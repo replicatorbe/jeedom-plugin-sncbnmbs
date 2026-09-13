@@ -1,0 +1,34 @@
+{
+    "id": "sncbnmbs",
+    "name": "SNCB/NMBS",
+    "pluginVersion": "1.0",
+    "description": {
+        "fr_FR": "Surveillance des trains SNCB/NMBS pour navetteurs, à partir des données ouvertes iRail. Chaque équipement représente un trajet (gare de départ, gare d'arrivée, créneau horaire, jours concernés) : le plugin liste les trains du jour et du lendemain, puis contrôle chaque minute les retards, les suppressions, les changements de quai et les perturbations du réseau. Les commandes info exposées (retard du prochain train, compte à rebours, quai, trajet perturbé) déclenchent vos scénarios, et une commande d'action Jeedom peut être appelée automatiquement dès qu'un retard dépasse le seuil choisi.",
+        "en_US": "SNCB/NMBS train monitoring for commuters, based on the iRail open data API. Each device represents a journey (departure station, arrival station, time window, active days): the plugin lists today's and tomorrow's trains, then checks every minute for delays, cancellations, platform changes and network disturbances. The exposed info commands (next train delay, countdown, platform, disrupted journey) trigger your scenarios, and a Jeedom action command can be called automatically as soon as a delay exceeds the chosen threshold."
+    },
+    "licence": "AGPL",
+    "author": "sMug (Jérôme Fafchamps)",
+    "require": "4.4",
+    "requireOsVersion": "11",
+    "category": "organization",
+    "index": "sncbnmbs",
+    "hasDependency": 0,
+    "hasOwnDeamon": 0,
+    "maxDependancyInstallTime": 5,
+    "eventjs": 0,
+    "issue": "https://github.com/replicatorbe/jeedom-plugin-sncbnmbs/issues",
+    "documentation": "https://github.com/replicatorbe/jeedom-plugin-sncbnmbs/blob/master/docs/#language#/index.md",
+    "documentation_beta": "https://github.com/replicatorbe/jeedom-plugin-sncbnmbs/blob/beta/docs/#language#/index.md",
+    "changelog": "https://github.com/replicatorbe/jeedom-plugin-sncbnmbs/blob/master/docs/#language#/changelog.md",
+    "changelog_beta": "https://github.com/replicatorbe/jeedom-plugin-sncbnmbs/blob/beta/docs/#language#/changelog.md",
+    "language": [
+        "fr_FR",
+        "en_US"
+    ],
+    "compatibility": [
+        "smart",
+        "rpi",
+        "docker",
+        "diy"
+    ]
+}
