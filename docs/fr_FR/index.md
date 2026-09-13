@@ -57,7 +57,7 @@ Bloc **Surveillance** :
 | Champ | Valeur |
 |---|---|
 | Seuil de retard | à partir de combien de minutes un train est « en retard ». 5 par défaut |
-| Surveillance à la minute | décochée, le trajet n'est plus relu qu'au quart d'heure |
+| Surveillance à la minute | décochée, le trajet n'est plus relu qu'une fois par heure |
 | Minutes d'avance | combien de minutes avant le créneau la surveillance à la minute démarre. 60 par défaut, 240 au maximum |
 | Nombre de trains | combien de départs suivre par créneau, de 1 à 6. 6 par défaut |
 | Commande à déclencher | la commande d'action Jeedom appelée dès qu'un problème apparaît. La croix la retire |
@@ -117,7 +117,8 @@ voulu un instant, pas une journée entière.
 ## La surveillance à la minute
 
 Dans la fenêtre de surveillance, le plugin interroge iRail **chaque minute**. En
-dehors, il se contente d'un appel **toutes les quinze minutes**.
+dehors, il se contente d'un appel **par heure**, et d'aucun entre 1 h et 5 h du
+matin : la SNCB ne fait plus guère circuler de trains, et personne ne regarde.
 
 La fenêtre de surveillance, c'est le créneau élargi en amont des « Minutes
 d'avance ». Avec un créneau de 7 h à 9 h et 60 minutes en amont,
@@ -147,8 +148,14 @@ pour en utiliser 120. Le plugin s'impose donc ses propres bornes :
   relues toutes les trois minutes, quel que soit le nombre d'équipements.
 
 La case « Surveillance à la minute » coupe cette surveillance sans supprimer le
-trajet : le quart d'heure continue de s'appliquer, et les horaires restent
+trajet : la lecture horaire continue de s'appliquer, et les horaires restent
 consultables.
+
+Après un échec, le trajet **attend avant de réessayer**, et l'attente double à
+chaque nouvel échec : une minute, deux, quatre, jusqu'à une heure. Un service qui
+retombe en marche est donc retrouvé en une minute, mais une gare définitivement
+fausse ne coûte plus que vingt-quatre requêtes par jour au lieu de mille deux
+cents. Le premier succès remet le compteur à zéro.
 
 Quand iRail ne répond pas, rien n'est effacé. Les derniers horaires connus
 restent affichés, la commande « Dernière vérification » garde l'heure de la
@@ -204,9 +211,28 @@ plus de rien » :
 - le bouton annonce combien de trains ont été acquittés, ou qu'il n'y avait
   aucune alerte en cours.
 
+## Le train de repli
+
+Quand le plugin vous réveille pour vous dire que votre train est supprimé, il
+connaît déjà le suivant : il est dans la même lecture. Quatre commandes
+l'exposent, et la notification le propose d'elle-même :
+
+> Soignies → Bruxelles-Central — IC 1706 de 07:38 supprimé — repli : P 7802 à
+> 07:54, voie 1
+
+Le repli est le premier train **du même jour** qui part après le prochain, qui
+n'est ni supprimé ni déjà parti. Deux limites à connaître :
+
+- il n'y a pas de repli au-delà du dernier train du créneau. Élargissez la
+  fenêtre si vous voulez qu'on vous en propose un après votre dernier train
+  habituel ;
+- le repli ne franchit jamais le jour. À 8 h 50 sur un créneau qui finit à 9 h,
+  « Repli dans » vaut `-1` : vous proposer le premier train de demain matin
+  n'aiderait personne.
+
 ## Commandes disponibles
 
-Vingt-trois commandes, dont quatre visibles par défaut — trois tuiles et un
+Vingt-sept commandes, dont quatre visibles par défaut — trois tuiles et un
 bouton.
 
 | Commande | Type | Description |
@@ -226,6 +252,10 @@ bouton.
 | Durée du trajet (`next_duration`) | info / numeric, min | |
 | Correspondances (`next_transfers`) | info / numeric | `0` pour un train direct |
 | Occupation (`next_occupancy`) | info / string | `Faible`, `Moyenne`, `Forte`, ou vide |
+| Train de repli (`next2_summary`) | info / string | la même ligne de résumé, pour le train d'après |
+| Départ du repli (`next2_time`) | info / string | son heure théorique, `HH:MM` |
+| Train de repli (numéro) (`next2_vehicle`) | info / string | `P 7800`, `IC 3706`… |
+| Repli dans (`next2_countdown`) | info / numeric, min | minutes avant son départ réel. `-1` quand il n'y a pas de repli |
 | Trains du créneau (`trains_count`) | info / numeric | nombre de trains connus, les deux jours confondus |
 | Trains en retard (`trains_delayed`) | info / numeric | historisée. Tout retard, même d'une minute |
 | Trains supprimés (`trains_canceled`) | info / numeric | historisée |
@@ -372,7 +402,7 @@ avec son nom, sa version et l'adresse de son dépôt. C'est la contrepartie d'un
 service gratuit, hébergé par une association.
 
 C'est aussi la raison de toute la politique d'appels décrite plus haut : la
-surveillance à la minute réservée à la fenêtre utile, le quart d'heure le reste
+surveillance à la minute réservée à la fenêtre utile, une lecture par heure le reste
 du temps, les perturbations mutualisées, la liste des gares gardée une semaine.
 Un plugin qui appellerait sans retenue ne se ferait pas seulement bloquer : il
 dégraderait le service pour tout le monde.
