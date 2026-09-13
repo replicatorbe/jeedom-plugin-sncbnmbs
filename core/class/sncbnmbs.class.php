@@ -198,6 +198,18 @@ class sncbnmbs extends eqLogic {
          * inopérant. Un trajet incomplet est signalé au centre de messages au
          * moment du rafraîchissement.
          */
+
+        /*
+         * Un trajet neuf naît actif et visible. « Ajouter » n'envoie que le nom
+         * (plugin.template.js, addEqLogic) : les cases « Activer » et « Visible »
+         * du formulaire, pourtant cochées dans le HTML, ne sont jamais lues à ce
+         * moment-là, et le trajet se retrouvait désactivé — absent du dashboard,
+         * ignoré par le cron, sans que rien ne le signale.
+         */
+        if ($this->getId() == '') {
+            $this->setIsEnable(1);
+            $this->setIsVisible(1);
+        }
         foreach (array(
             'slot_start'   => self::DEFAULT_SLOT_START,
             'slot_end'     => self::DEFAULT_SLOT_END,
