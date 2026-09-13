@@ -152,7 +152,10 @@ trajet : la lecture horaire continue de s'appliquer, et les horaires restent
 consultables.
 
 Après un échec, le trajet **attend avant de réessayer**, et l'attente double à
-chaque nouvel échec : une minute, deux, quatre, jusqu'à une heure. Un service qui
+chaque nouvel échec : une minute, deux, quatre, jusqu'à une heure. **Jamais plus
+de deux minutes pendant la surveillance**, cependant : un train peut y être
+supprimé à tout instant, et un service qui hoquette ne doit pas nous rendre
+aveugles au moment précis où le plugin sert à quelque chose. Un service qui
 retombe en marche est donc retrouvé en une minute, mais une gare définitivement
 fausse ne coûte plus que vingt-quatre requêtes par jour au lieu de mille deux
 cents. Le premier succès remet le compteur à zéro.
