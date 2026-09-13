@@ -54,7 +54,7 @@ typed: the plugin works with iRail identifiers, not with names.
 | Field | Value |
 |---|---|
 | Delay threshold | from how many minutes a train counts as "delayed". 5 by default |
-| Minute-by-minute watching | unticked, the journey is only read again every quarter of an hour |
+| Minute-by-minute watching | unticked, the journey is only read again once an hour |
 | Minutes ahead | how many minutes before the window the minute-by-minute watch starts. 60 by default, 240 at most |
 | Number of trains | how many departures to follow per window, from 1 to 6. 6 by default |
 | Command to trigger | the Jeedom action command called as soon as a problem shows up. The cross clears it |
@@ -111,7 +111,8 @@ identical lasts one hour, not twenty-four: you meant a moment, not a whole day.
 ## Minute-by-minute watching
 
 Inside the watch window, the plugin queries iRail **every minute**. Outside of
-it, it settles for one call **every fifteen minutes**.
+it, it settles for one call **an hour**, and none between 1 and 5 in the
+morning: hardly any train runs then, and nobody is looking.
 
 The watch window is the time window, widened upstream by the "Minutes ahead".
 With a window from 7 to 9 am and 60 minutes upstream, the plugin watches from 6
@@ -142,6 +143,12 @@ plugin therefore sets its own bounds:
 The "Minute-by-minute watching" box turns that watch off without deleting the
 journey: the quarter-hourly read still applies, and the timetable stays
 readable.
+
+After a failure, the journey **waits before trying again**, and the wait doubles
+with every further failure: one minute, two, four, up to an hour. A service
+coming back up is therefore found again within a minute, while a permanently
+wrong station costs twenty-four requests a day instead of twelve hundred. The
+first success resets the counter.
 
 When iRail does not answer, nothing is erased. The last known timetable stays
 displayed, the "Last check" command keeps the time of the last successful read,
@@ -194,9 +201,27 @@ warning me about anything":
 - the button reports how many trains were acknowledged, or that there was no
   alert to acknowledge.
 
+## The fallback train
+
+When the plugin wakes you to say your train is cancelled, it already knows the
+next one: it is in the same reading. Four commands expose it, and the
+notification offers it by itself:
+
+> Soignies → Bruxelles-Central — IC 1706 at 07:38 cancelled — fallback: P 7802
+> at 07:54, platform 1
+
+The fallback is the first train **of the same day** leaving after the next one,
+neither cancelled nor already gone. Two limits worth knowing:
+
+- there is no fallback beyond the last train of the window. Widen the window if
+  you want one offered after your usual last train;
+- the fallback never crosses over to another day. At 8:50 am on a window ending
+  at 9, "Fallback in" is `-1`: offering you tomorrow's first train would help
+  nobody.
+
 ## Available commands
 
-Twenty-three commands, four of them visible by default — three tiles and a
+Twenty-seven commands, four of them visible by default — three tiles and a
 button.
 
 | Command | Type | Description |
@@ -216,6 +241,10 @@ button.
 | Journey duration (`next_duration`) | info / numeric, min | |
 | Transfers (`next_transfers`) | info / numeric | `0` for a direct train |
 | Occupancy (`next_occupancy`) | info / string | `Low`, `Medium`, `High`, or empty |
+| Fallback train (`next2_summary`) | info / string | the same summary line, for the train after |
+| Fallback departure (`next2_time`) | info / string | its timetable time, `HH:MM` |
+| Fallback train (number) (`next2_vehicle`) | info / string | `P 7800`, `IC 3706`… |
+| Fallback in (`next2_countdown`) | info / numeric, min | minutes before its actual departure. `-1` when there is no fallback |
 | Trains in the window (`trains_count`) | info / numeric | number of known trains, both days together |
 | Delayed trains (`trains_delayed`) | info / numeric | historised. Any delay, even of one minute |
 | Cancelled trains (`trains_canceled`) | info / numeric | historised |
@@ -360,7 +389,7 @@ does so, with its name, its version and the address of its repository. That is
 the counterpart of a free service, hosted by a non-profit.
 
 It is also the reason for the whole call policy described above: minute-by-minute
-watching reserved for the useful window, a quarter of an hour the rest of the
+watching reserved for the useful window, one reading an hour the rest of the
 time, shared disturbances, the station list kept for a week. A plugin calling
 without restraint would not merely get blocked: it would degrade the service for
 everyone.

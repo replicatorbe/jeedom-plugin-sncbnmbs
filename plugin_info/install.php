@@ -20,7 +20,20 @@ require_once __DIR__ . '/../../../core/php/core.inc.php';
 function sncbnmbs_install() {
 }
 
+/*
+ * Une mise à jour du plugin qui ajoute des commandes ne les fait pas apparaître
+ * toute seule sur les trajets existants : createCommands() ne tourne qu'au
+ * postSave d'un équipement. Sans cette boucle, l'utilisateur devrait rouvrir et
+ * réenregistrer chacun de ses trajets pour voir le train de repli.
+ */
 function sncbnmbs_update() {
+    foreach (eqLogic::byType('sncbnmbs') as $eqLogic) {
+        try {
+            $eqLogic->save();
+        } catch (Throwable $e) {
+            log::add('sncbnmbs', 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
+        }
+    }
 }
 
 /*

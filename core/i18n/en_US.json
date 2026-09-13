@@ -43,7 +43,13 @@
         "Forte": "High",
         "Aujourd'hui": "Today",
         "Demain": "Tomorrow",
-        "Arrivée réelle": "Actual arrival"
+        "Arrivée réelle": "Actual arrival",
+        "Train de repli": "Fallback train",
+        "Départ du repli": "Fallback departure",
+        "Train de repli (numéro)": "Fallback train (number)",
+        "Repli dans": "Fallback in",
+        "à": "at",
+        "repli :": "fallback:"
     },
     "plugins/sncbnmbs/core/ajax/sncbnmbs.ajax.php": {
         "401 - Accès non autorisé": "401 - Access denied",

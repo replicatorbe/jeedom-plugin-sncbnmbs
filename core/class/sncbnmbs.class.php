@@ -38,18 +38,41 @@ class sncbnmbs extends eqLogic {
 
     /*
      * Les perturbations sont mutualisées entre tous les trajets : elles
-     * décrivent le réseau, pas un voyage. Trois minutes suffisent à rester
-     * réactif sans multiplier les appels par le nombre d'équipements.
+     * décrivent le réseau, pas un voyage. Dix minutes, et non trois : à trois,
+     * ce cache coûtait 480 requêtes par jour — plus qu'un trajet entier — pour
+     * une information qui n'apparaît ni ne disparaît en si peu de temps. Les
+     * alertes, elles, ne dépendent pas de ce cache.
      */
-    const DISTURBANCES_TTL = 180;
+    const DISTURBANCES_TTL = 600;
 
     /* Les trains du lendemain ne bougent pas à la minute : inutile de les
      * relire aussi souvent que ceux du jour. */
     const TOMORROW_TTL = 1800;
 
-    /* Hors fenêtre de surveillance, un rafraîchissement au quart d'heure suffit
-     * à garder la liste du jour à jour sans interroger iRail 1440 fois. */
-    const IDLE_INTERVAL = 900;
+    /*
+     * Hors fenêtre de surveillance, une lecture par heure suffit : personne ne
+     * regarde, et tout est relu dès que la fenêtre s'ouvre. Au quart d'heure,
+     * c'était un tiers des requêtes d'une journée dépensé pour rien.
+     */
+    const IDLE_INTERVAL = 3600;
+
+    /*
+     * Et la nuit, rien du tout : la SNCB ne fait plus circuler grand-chose entre
+     * une heure et cinq heures, et le navetteur dort. La fenêtre de surveillance,
+     * elle, reste prioritaire — un créneau de nuit continue d'être suivi.
+     */
+    const QUIET_FROM = 1;
+    const QUIET_TO   = 5;
+
+    /*
+     * Recul après échec. Sans lui, un trajet dont la gare est introuvable
+     * relançait 1 200 requêtes par jour, indéfiniment : l'appel échoue, rien
+     * n'est mis en cache, l'âge reste infini et le cron réessaie à la minute
+     * suivante. C'est très exactement le client abusif que ce plugin s'interdit
+     * d'être — et il frappait le plus fort quand iRail était déjà en peine.
+     */
+    const BACKOFF_BASE = 60;
+    const BACKOFF_MAX  = 3600;
 
     /* Garde-fou contre un scénario qui appellerait « Rafraîchir » en boucle. */
     const FORCE_MIN_INTERVAL = 20;
@@ -161,11 +184,22 @@ class sncbnmbs extends eqLogic {
             return false;
         }
         $now = ($_now === null) ? time() : $_now;
+
+        /* Un trajet en échec attend son tour : voir BACKOFF_BASE. */
+        $backoff = $this->getBackoff();
+        if (isset($backoff['until']) && $now < $backoff['until']) {
+            return false;
+        }
+
         $cache = $this->getJourneys();
         $age = $now - (isset($cache['fetchedAt']) ? $cache['fetchedAt'] : 0);
 
         if ($this->isWatching($now)) {
             return $age >= 55;
+        }
+        $heure = (int) date('G', $now);
+        if ($heure >= self::QUIET_FROM && $heure < self::QUIET_TO) {
+            return false;
         }
         return $age >= self::IDLE_INTERVAL;
     }
@@ -403,6 +437,21 @@ class sncbnmbs extends eqLogic {
         $this->addCmdIfMissing('next_transfers', 'Correspondances', 'info', 'numeric', array('order' => $order++));
         $this->addCmdIfMissing('next_occupancy', 'Occupation', 'info', 'string', array('order' => $order++));
 
+        /* ------------------------------------------------------- le repli */
+        /*
+         * Quand le plugin réveille quelqu'un pour lui dire que son train est
+         * supprimé, il a déjà le suivant en mémoire. Le garder pour lui obligeait
+         * l'utilisateur à sortir son téléphone au pire moment.
+         */
+        $this->addCmdIfMissing('next2_summary', 'Train de repli', 'info', 'string', array(
+            'order' => $order++, 'template' => 'sncbnmbs::sncbnmbs',
+        ));
+        $this->addCmdIfMissing('next2_time', 'Départ du repli', 'info', 'string', array('order' => $order++));
+        $this->addCmdIfMissing('next2_vehicle', 'Train de repli (numéro)', 'info', 'string', array('order' => $order++));
+        $this->addCmdIfMissing('next2_countdown', 'Repli dans', 'info', 'numeric', array(
+            'order' => $order++, 'unite' => 'min',
+        ));
+
         /* ------------------------------------------------- l'état du créneau */
         $this->addCmdIfMissing('trains_count', 'Trains du créneau', 'info', 'numeric', array('order' => $order++));
         $this->addCmdIfMissing('trains_delayed', 'Trains en retard', 'info', 'numeric', array(
@@ -489,6 +538,7 @@ class sncbnmbs extends eqLogic {
              * commandes sont recomposées depuis le cache, avec l'heure de la
              * dernière lecture réussie. L'erreur remonte à l'appelant.
              */
+            $this->noteFailure($now);
             $this->_refreshError = $e->getMessage();
             $this->reportProblem($e->getMessage());
             $this->refreshFromCache();
@@ -496,6 +546,7 @@ class sncbnmbs extends eqLogic {
         }
 
         $this->clearProblem();
+        $this->clearBackoff();
         $this->saveJourneys($journeys);
         $this->refreshCommands($journeys);
         $this->checkAlerts($journeys);
@@ -539,7 +590,13 @@ class sncbnmbs extends eqLogic {
              */
             $live = ($now >= $slot['start'] - ($this->watchBefore() * 60) && $now <= $slot['end']);
             $age = $now - (isset($previousAt[$date]) ? $previousAt[$date] : 0);
-            $stale = ($_force || $live || $age >= self::TOMORROW_TTL);
+            /*
+             * Un créneau à plus de six heures n'a rien à dire de neuf : les
+             * retards ne s'annoncent pas la veille. Trois heures d'intervalle
+             * suffisent, contre une demi-heure quand il approche.
+             */
+            $ttl = (($slot['start'] - $now) > 21600) ? 10800 : self::TOMORROW_TTL;
+            $stale = ($_force || $live || $age >= $ttl);
 
             if (!$stale) {
                 // Réutiliser tels quels les trains déjà connus pour cette date.
@@ -607,7 +664,7 @@ class sncbnmbs extends eqLogic {
             'alerts'  => 'true',
             'results' => $this->maxTrains(),
         );
-        $data = self::call('connections', $params);
+        $data = static::call('connections', $params);
 
         $trains = array();
         $connections = isset($data['connection']) ? $data['connection'] : array();
@@ -620,9 +677,26 @@ class sncbnmbs extends eqLogic {
             // un avertissement à chaque minute dans les journaux.
             $connections = array();
         }
+        $vus = array();
         foreach ($connections as $connection) {
             $train = self::parseConnection($connection, $_slot['date']);
             if ($train === null) {
+                continue;
+            }
+            /*
+             * iRail rend parfois deux fois le même départ, avec deux acheminements
+             * différents — observé sur Soignies → Bruxelles-Central, l'IC 3706 de
+             * 06:37 listé deux fois. La clé (train + heure de départ) est alors
+             * identique : sans ce filtre, le tableau affiche le train en double,
+             * « trains du créneau » le compte deux fois, et un acquittement porte
+             * sur les deux. On garde le trajet le plus court.
+             */
+            if (isset($vus[$train['key']])) {
+                $ancien = $vus[$train['key']];
+                if ($train['duration'] >= $trains[$ancien]['duration']) {
+                    continue;
+                }
+                $trains[$ancien] = $train;
                 continue;
             }
             /*
@@ -633,6 +707,7 @@ class sncbnmbs extends eqLogic {
             if ($train['depTs'] > $_slot['end'] || $train['depTs'] < $_slot['start']) {
                 continue;
             }
+            $vus[$train['key']] = count($trains);
             $trains[] = $train;
         }
         return $trains;
@@ -781,7 +856,13 @@ class sncbnmbs extends eqLogic {
          * une ligne coupée est annoncée là avant que les trains ne soient
          * marqués supprimés.
          */
-        foreach ($this->matchingDisturbances() as $disturbance) {
+        /*
+         * Hors surveillance, on se contente de ce qui est déjà en cache : cette
+         * boucle tourne à chaque minute et pour chaque trajet, et elle relisait
+         * les perturbations nuit et week-end compris, pour un écran que
+         * personne ne regarde.
+         */
+        foreach ($this->matchingDisturbances($this->isWatching($now)) as $disturbance) {
             $messages[] = $disturbance;
         }
 
@@ -791,6 +872,19 @@ class sncbnmbs extends eqLogic {
         $this->publishCmd('delay_max', $maxDelay);
         $this->publishCmd('alert_message', implode(' — ', array_slice(array_unique($messages), 0, 3)));
         $this->publishCmd('last_update', date('d/m/Y H:i', isset($_journeys['fetchedAt']) ? $_journeys['fetchedAt'] : $now));
+
+        $fallback = $this->fallbackTrain($trains, $next, $now);
+        if ($fallback === null) {
+            $this->publishCmd('next2_summary', '');
+            $this->publishCmd('next2_time', '');
+            $this->publishCmd('next2_vehicle', '');
+            $this->publishCmd('next2_countdown', -1);
+        } else {
+            $this->publishCmd('next2_summary', $this->summaryOf($fallback));
+            $this->publishCmd('next2_time', date('H:i', $fallback['depTs']));
+            $this->publishCmd('next2_vehicle', $fallback['vehicle']);
+            $this->publishCmd('next2_countdown', max(0, (int) floor((($fallback['depTs'] + $fallback['depDelay']) - $now) / 60)));
+        }
 
         if ($next === null) {
             $this->publishCmd('summary', __('Aucun train dans le créneau', __FILE__));
@@ -848,6 +942,37 @@ class sncbnmbs extends eqLogic {
                 continue;
             }
             if (($train['depTs'] + $train['depDelay']) < ($now - 60)) {
+                continue;
+            }
+            return $train;
+        }
+        return null;
+    }
+
+    /*
+     * Le train d'après, celui qu'on prendra si le prochain est supprimé. Il doit
+     * partir le MÊME jour que le prochain : sans ce contrôle, un trajet consulté
+     * à 8 h 50 proposerait comme repli le premier train de demain matin, ce qui
+     * n'aide personne. Un train lui-même supprimé n'est évidemment pas un repli.
+     */
+    private function fallbackTrain($_trains, $_next, $_now = null) {
+        if ($_next === null) {
+            return null;
+        }
+        $now = ($_now === null) ? time() : $_now;
+        $vu = false;
+        foreach ($_trains as $train) {
+            if (!$vu) {
+                if ($train['key'] === $_next['key']) { $vu = true; }
+                continue;
+            }
+            if ($train['date'] !== $_next['date']) {
+                break;
+            }
+            if ($train['depCanceled'] || $train['arrCanceled'] || $train['left']) {
+                continue;
+            }
+            if (($train['depTs'] + $train['depDelay']) < $now) {
                 continue;
             }
             return $train;
@@ -954,7 +1079,8 @@ class sncbnmbs extends eqLogic {
             return;
         }
 
-        $message = $this->alertMessage($events);
+        $next = $this->nextTrain($trains, $now);
+        $message = $this->alertMessage($events, $this->fallbackTrain($trains, $next, $now));
         log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . $message);
         $this->runAlertCmd($message);
     }
@@ -1001,12 +1127,27 @@ class sncbnmbs extends eqLogic {
         );
     }
 
-    private function alertMessage($_events) {
+    private function alertMessage($_events, $_fallback = null) {
         $texts = array();
         foreach ($_events as $event) {
             $texts[] = $event['text'];
         }
-        return $this->routeLabel() . ' — ' . implode(', ', array_slice($texts, 0, 3));
+        $message = $this->routeLabel() . ' — ' . implode(', ', array_slice($texts, 0, 3));
+
+        /*
+         * Dire ce qu'il faut faire, et pas seulement ce qui ne va pas : c'est
+         * toute la différence entre une alerte qui réveille et une alerte qui
+         * sert. Le train de repli est déjà en mémoire.
+         */
+        if ($_fallback !== null) {
+            $repli = $_fallback['vehicle'] . ' ' . __('à', __FILE__) . ' '
+                . date('H:i', $_fallback['depTs'] + $_fallback['depDelay']);
+            if ($_fallback['depPlatform'] != '' && $_fallback['depPlatform'] != '?') {
+                $repli .= ', ' . __('voie', __FILE__) . ' ' . $_fallback['depPlatform'];
+            }
+            $message .= ' — ' . __('repli :', __FILE__) . ' ' . $repli;
+        }
+        return $message;
     }
 
     /*
@@ -1130,6 +1271,42 @@ class sncbnmbs extends eqLogic {
 
     private function clearJourneys() {
         $cache = cache::byKey($this->journeyKey());
+        if (is_object($cache)) {
+            $cache->remove();
+        }
+    }
+
+    /* ================================================================= RECUL */
+
+    private function backoffKey() {
+        return __CLASS__ . '::backoff::' . $this->getId();
+    }
+
+    private function getBackoff() {
+        $cache = cache::byKey($this->backoffKey());
+        $value = $cache->getValue();
+        return is_array($value) ? $value : array();
+    }
+
+    /*
+     * Chaque échec double l'attente : une minute, deux, quatre… jusqu'à une
+     * heure. Un service qui retombe en marche est donc retrouvé en une minute,
+     * mais une gare définitivement fausse ne coûte plus que vingt-quatre
+     * requêtes par jour au lieu de mille deux cents.
+     */
+    private function noteFailure($_now = null) {
+        $now = ($_now === null) ? time() : $_now;
+        $state = $this->getBackoff();
+        $fails = isset($state['fails']) ? ((int) $state['fails'] + 1) : 1;
+        $attente = min(self::BACKOFF_MAX, self::BACKOFF_BASE * pow(2, $fails - 1));
+        cache::set($this->backoffKey(), array(
+            'fails' => $fails,
+            'until' => $now + $attente,
+        ), 86400);
+    }
+
+    private function clearBackoff() {
+        $cache = cache::byKey($this->backoffKey());
         if (is_object($cache)) {
             $cache->remove();
         }
@@ -1378,9 +1555,12 @@ class sncbnmbs extends eqLogic {
             $data = self::call('disturbances', array());
         } catch (Throwable $e) {
             log::add(__CLASS__, 'debug', __('Perturbations indisponibles :', __FILE__) . ' ' . $e->getMessage());
-            // Mémoriser l'échec brièvement : sans cela, chaque trajet réessaierait
-            // à la suite et multiplierait les appels sur un service déjà en peine.
-            cache::set($key, array(), 60);
+            /*
+             * Cinq minutes, et non soixante secondes : à une minute, l'entrée
+             * expirait pile à chaque passage du cron et l'échec triplait la
+             * charge au lieu de la réduire.
+             */
+            cache::set($key, array(), 300);
             return array();
         }
 
