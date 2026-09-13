@@ -74,6 +74,15 @@ class sncbnmbs extends eqLogic {
     const BACKOFF_BASE = 60;
     const BACKOFF_MAX  = 3600;
 
+    /*
+     * Mais JAMAIS plus de deux minutes pendant la surveillance. Le recul protège
+     * iRail d'un plugin qui s'acharne ; il ne doit pas nous rendre aveugles au
+     * moment précis où un train peut être supprimé. Un hoquet du service à 7 h,
+     * avec un train à 7 h 09, nous aurait sinon fait manquer la suppression —
+     * et c'est exactement ce que ce plugin existe pour éviter.
+     */
+    const BACKOFF_WATCHING_MAX = 120;
+
     /* Garde-fou contre un scénario qui appellerait « Rafraîchir » en boucle. */
     const FORCE_MIN_INTERVAL = 20;
 
@@ -187,8 +196,14 @@ class sncbnmbs extends eqLogic {
 
         /* Un trajet en échec attend son tour : voir BACKOFF_BASE. */
         $backoff = $this->getBackoff();
-        if (isset($backoff['until']) && $now < $backoff['until']) {
-            return false;
+        if (isset($backoff['at'])) {
+            $attente = isset($backoff['wait']) ? (int) $backoff['wait'] : self::BACKOFF_BASE;
+            if ($this->isWatching($now)) {
+                $attente = min($attente, self::BACKOFF_WATCHING_MAX);
+            }
+            if ($now < ($backoff['at'] + $attente)) {
+                return false;
+            }
         }
 
         $cache = $this->getJourneys();
@@ -1299,9 +1314,15 @@ class sncbnmbs extends eqLogic {
         $state = $this->getBackoff();
         $fails = isset($state['fails']) ? ((int) $state['fails'] + 1) : 1;
         $attente = min(self::BACKOFF_MAX, self::BACKOFF_BASE * pow(2, $fails - 1));
+        /*
+         * On mémorise l'attente et l'instant de l'échec, et non l'échéance :
+         * shouldPoll() doit pouvoir raccourcir l'attente quand la surveillance
+         * est active, ce qu'une échéance déjà calculée interdirait.
+         */
         cache::set($this->backoffKey(), array(
             'fails' => $fails,
-            'until' => $now + $attente,
+            'at'    => $now,
+            'wait'  => $attente,
         ), 86400);
     }
 

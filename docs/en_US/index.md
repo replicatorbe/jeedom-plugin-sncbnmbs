@@ -145,7 +145,10 @@ journey: the quarter-hourly read still applies, and the timetable stays
 readable.
 
 After a failure, the journey **waits before trying again**, and the wait doubles
-with every further failure: one minute, two, four, up to an hour. A service
+with every further failure: one minute, two, four, up to an hour. **Never more
+than two minutes while watching**, though: a train can be cancelled at any
+moment there, and a hiccuping service must not blind us at the very moment the
+plugin is of use. A service
 coming back up is therefore found again within a minute, while a permanently
 wrong station costs twenty-four requests a day instead of twelve hundred. The
 first success resets the counter.
