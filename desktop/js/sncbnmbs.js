@@ -213,9 +213,16 @@ function sncbnmbsSuffix(_which) {
  * 'to'. Appelée aussi bien sur « change » qu'après chaque remplissage de la
  * liste, pour que l'affichage et la valeur en base ne puissent jamais diverger.
  */
-function sncbnmbsCommitStation(_which, _select) {
+/*
+ * _allowClear : seul un choix explicite de l'utilisateur dans la liste peut
+ * effacer une gare. Après une recherche, la liste peut très bien ne pas contenir
+ * la gare déjà enregistrée — il suffit de revérifier l'orthographe avant
+ * d'enregistrer — et le repère vide effaçait alors silencieusement le trajet.
+ */
+function sncbnmbsCommitStation(_which, _select, _allowClear) {
   if (_select === null) { return }
   var id = _select.value
+  if (id === '' && _allowClear !== true) { return }
   if (sncbnmbsConfig(_which + '_id') === id) { return }
 
   sncbnmbsSetConfig(_which + '_id', id)
@@ -307,6 +314,16 @@ function sncbnmbsSyncCheckboxes(_eqLogic) {
   var watch = document.querySelector('.eqLogicAttr[data-l1key="configuration"][data-l2key="watch_enabled"]')
   if (watch !== null) {
     watch.checked = isNew ? true : (init(config.watch_enabled, 0) == 1)
+  }
+
+  /* Les catégories souffrent du même mal : le coeur ne décoche jamais une case,
+     et ne réinjecte rien quand la valeur reçue est vide. Sans cela, les
+     catégories du trajet précédent restaient cochées sur le suivant. */
+  var categories = (isset(_eqLogic) && isset(_eqLogic.category)) ? _eqLogic.category : {}
+  var boxes = document.querySelectorAll('.eqLogicAttr[data-l1key="category"]')
+  for (var c = 0; c < boxes.length; c++) {
+    var key = boxes[c].getAttribute('data-l2key')
+    boxes[c].checked = (init(categories[key], 0) == 1)
   }
 }
 
@@ -745,11 +762,11 @@ var sncbnmbsContainer = document.getElementById('div_pageContainer') || document
 
 sncbnmbsContainer.addEventListener('change', function (event) {
   if (event.target.closest('#sel_sncbnmbsFrom')) {
-    sncbnmbsCommitStation('from', event.target)
+    sncbnmbsCommitStation('from', event.target, true)
     return
   }
   if (event.target.closest('#sel_sncbnmbsTo')) {
-    sncbnmbsCommitStation('to', event.target)
+    sncbnmbsCommitStation('to', event.target, true)
     return
   }
 })
