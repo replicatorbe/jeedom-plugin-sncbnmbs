@@ -653,21 +653,24 @@ class sncbnmbs extends eqLogic {
             if (isset($alert['endTime']) && (int) $alert['endTime'] > 0 && (int) $alert['endTime'] < $now) {
                 continue;
             }
-            $text = isset($alert['header']) ? $alert['header'] : (isset($alert['description']) ? $alert['description'] : '');
-            if (trim($text) != '') {
-                $alerts[] = trim($text);
+            $text = self::sanitizeText(isset($alert['header']) ? $alert['header'] : (isset($alert['description']) ? $alert['description'] : ''));
+            if ($text != '') {
+                $alerts[] = $text;
             }
         }
         foreach (self::itemsOf($_connection, 'remarks', 'remark') as $remark) {
-            $text = isset($remark['header']) ? $remark['header'] : (isset($remark['description']) ? $remark['description'] : '');
-            if (trim($text) != '') {
-                $alerts[] = trim($text);
+            $text = self::sanitizeText(isset($remark['header']) ? $remark['header'] : (isset($remark['description']) ? $remark['description'] : ''));
+            if ($text != '') {
+                $alerts[] = $text;
             }
         }
 
         $depTs = (int) $departure['time'];
-        $vehicle = isset($departure['vehicleinfo']['shortname']) ? $departure['vehicleinfo']['shortname']
-            : (isset($departure['vehicle']) ? str_replace('BE.NMBS.', '', $departure['vehicle']) : '?');
+        $vehicle = self::sanitizeText(isset($departure['vehicleinfo']['shortname']) ? $departure['vehicleinfo']['shortname']
+            : (isset($departure['vehicle']) ? str_replace('BE.NMBS.', '', $departure['vehicle']) : '?'));
+        if ($vehicle === '') {
+            $vehicle = '?';
+        }
 
         return array(
             /*
@@ -681,15 +684,15 @@ class sncbnmbs extends eqLogic {
             'vehicleId'  => isset($departure['vehicle']) ? $departure['vehicle'] : '',
             'depTs'      => $depTs,
             'depDelay'   => self::sanitizeDelay(isset($departure['delay']) ? $departure['delay'] : 0),
-            'depPlatform' => isset($departure['platform']) ? $departure['platform'] : '',
+            'depPlatform' => self::sanitizeText(isset($departure['platform']) ? $departure['platform'] : ''),
             'depPlatformNormal' => !isset($departure['platforminfo']['normal']) || $departure['platforminfo']['normal'] == '1',
             'depCanceled' => isset($departure['canceled']) && $departure['canceled'] == '1',
             'left'       => isset($departure['left']) && $departure['left'] == '1',
-            'direction'  => isset($departure['direction']['name']) ? $departure['direction']['name'] : '',
+            'direction'  => self::sanitizeText(isset($departure['direction']['name']) ? $departure['direction']['name'] : ''),
             'occupancy'  => isset($departure['occupancy']['name']) ? $departure['occupancy']['name'] : '',
             'arrTs'      => isset($arrival['time']) ? (int) $arrival['time'] : 0,
             'arrDelay'   => self::sanitizeDelay(isset($arrival['delay']) ? $arrival['delay'] : 0),
-            'arrPlatform' => isset($arrival['platform']) ? $arrival['platform'] : '',
+            'arrPlatform' => self::sanitizeText(isset($arrival['platform']) ? $arrival['platform'] : ''),
             'arrCanceled' => isset($arrival['canceled']) && $arrival['canceled'] == '1',
             'arrived'    => isset($arrival['arrived']) && $arrival['arrived'] == '1',
             'duration'   => isset($_connection['duration']) ? (int) $_connection['duration'] : 0,
@@ -1072,7 +1075,7 @@ class sncbnmbs extends eqLogic {
             foreach ($names as $name) {
                 // Limite de mot : « Mol » ne doit pas s'accrocher à « Molenbeek ».
                 if (preg_match('/\b' . preg_quote($name, '/') . '\b/', $haystack) === 1) {
-                    $matches[] = isset($disturbance['title']) ? $disturbance['title'] : '';
+                    $matches[] = self::sanitizeText(isset($disturbance['title']) ? $disturbance['title'] : '');
                     break;
                 }
             }
@@ -1157,8 +1160,8 @@ class sncbnmbs extends eqLogic {
     /* ================================================================= RÉGLAGES */
 
     public function routeLabel() {
-        $from = $this->getConfiguration('from_label', $this->getConfiguration('from_id', '?'));
-        $to = $this->getConfiguration('to_label', $this->getConfiguration('to_id', '?'));
+        $from = self::sanitizeText($this->getConfiguration('from_label', $this->getConfiguration('from_id', '?')));
+        $to = self::sanitizeText($this->getConfiguration('to_label', $this->getConfiguration('to_id', '?')));
         return $from . ' → ' . $to;
     }
 
@@ -1283,9 +1286,9 @@ class sncbnmbs extends eqLogic {
                 continue;
             }
             $stations[] = array(
-                'id'   => $station['id'],
-                'name' => isset($station['name']) ? $station['name'] : $station['id'],
-                'standardname' => isset($station['standardname']) ? $station['standardname'] : '',
+                'id'   => self::sanitizeText($station['id']),
+                'name' => self::sanitizeText(isset($station['name']) ? $station['name'] : $station['id']),
+                'standardname' => self::sanitizeText(isset($station['standardname']) ? $station['standardname'] : ''),
             );
         }
         if (!empty($stations)) {
@@ -1502,6 +1505,24 @@ class sncbnmbs extends eqLogic {
         }
         $ts = strtotime($_date);
         return ($ts === false) ? $_date : date('d/m', $ts);
+    }
+
+    /*
+     * Neutralise le texte venu d'iRail avant qu'il ne devienne la valeur d'une
+     * commande. Les gabarits de widget de Jeedom placent la valeur dans un
+     * littéral JavaScript, échappée par addslashes() — ce qui protège des
+     * apostrophes mais pas d'un « </script> », qui referme le bloc et rend
+     * actif le HTML qui suit. Le plugin ne peut pas corriger le coeur ; il peut
+     * s'interdire d'y verser des chevrons.
+     */
+    public static function sanitizeText($_text) {
+        if (!is_scalar($_text)) {
+            return '';
+        }
+        $text = str_replace(array('<', '>'), '', (string) $_text);
+        // Les caractères de contrôle ne servent à rien et cassent le JSON.
+        $text = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $text);
+        return trim($text);
     }
 
     /*
