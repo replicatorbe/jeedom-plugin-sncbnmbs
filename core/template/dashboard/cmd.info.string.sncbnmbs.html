@@ -1,0 +1,137 @@
+<div class="cmd cmd-widget #history#" data-type="info" data-subtype="string" data-template="sncbnmbs" data-status="" data-cmd_id="#id#" data-cmd_uid="#uid#" data-version="#version#" data-eqLogic_id="#eqLogic_id#">
+  <div class="title #hide_name#">
+    <div class="cmdName">#name_display#</div>
+  </div>
+  <div class="content">
+    <div class="sncbnmbsTrain">
+      <i class="fas fa-train sncbnmbsIcon"></i>
+      <span class="sncbnmbsVehicle"></span>
+      <span class="sncbnmbsTime"></span>
+    </div>
+    <div class="sncbnmbsDelay"></div>
+    <div class="sncbnmbsPlatform"></div>
+  </div>
+  <div class="timeCmd label label-default #history#" data-type="info"></div>
+  <template>
+    <div>time : duration|date ({{Affiche durée ou date de la valeur}})</div>
+    <div>platform : 0 ({{Masque l'étiquette de voie}})</div>
+    <div>timeonly : 1 ({{N'affiche que l'heure, sans le nom du train}})</div>
+  </template>
+  <script>
+    (function () {
+      /* Une seule feuille de style pour toutes les tuiles du plugin, posée au
+         premier rendu. Le CSS d'un plugin n'est pas chargé sur le dashboard, et
+         les règles .content du coeur n'existent pas côté mobile : le gabarit doit
+         se suffire à lui-même. Aucune couleur en dur, tout vient du thème. */
+      if (!document.getElementById('sncbnmbsWidgetCss')) {
+        var css = document.createElement('style')
+        css.id = 'sncbnmbsWidgetCss'
+        css.textContent = [
+          '.cmd-widget[data-template="sncbnmbs"]{display:flex;flex-direction:column;align-items:center;width:100%}',
+          '.cmd-widget[data-template="sncbnmbs"] .cmdName{font-size:12px;line-height:16px;font-weight:400;color:var(--txt-color)}',
+          '.cmd-widget[data-template="sncbnmbs"] .content{display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;padding:0 4px 2px;gap:3px}',
+          '.cmd-widget[data-template="sncbnmbs"] .sncbnmbsTrain{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px;width:100%;text-align:center}',
+          '.cmd-widget[data-template="sncbnmbs"] .sncbnmbsIcon{font-size:1.1em;color:var(--txt-color)}',
+          /* icon_orange et icon_red ne colorent que si l'utilisateur a activé les
+             icônes colorées : ces deux règles donnent la même couleur sinon. */
+          '.cmd-widget[data-template="sncbnmbs"][data-status="warning"] .sncbnmbsIcon{color:var(--al-warning-color)}',
+          '.cmd-widget[data-template="sncbnmbs"][data-status="danger"] .sncbnmbsIcon{color:var(--al-danger-color)}',
+          '.cmd-widget[data-template="sncbnmbs"] .sncbnmbsVehicle{font-size:1.05em;font-weight:600;line-height:1.2;color:var(--txt-color);overflow-wrap:anywhere}',
+          '.cmd-widget[data-template="sncbnmbs"] .sncbnmbsTime{font-size:1.5em;font-weight:700;line-height:1.15;color:var(--txt-color)}',
+          /* Un train supprimé ne partira pas : son heure est barrée, pour que la
+             tuile reste lisible même en noir et blanc ou sans distinguer le rouge. */
+          '.cmd-widget[data-template="sncbnmbs"][data-status="danger"] .sncbnmbsTime{text-decoration:line-through}',
+          '.cmd-widget[data-template="sncbnmbs"] .sncbnmbsDelay.label{padding:2px 6px;font-size:.85em;font-weight:600;line-height:1.35;border-radius:var(--border-radius)}',
+          '.cmd-widget[data-template="sncbnmbs"] .sncbnmbsPlatform{padding:2px 6px;font-size:.85em;font-weight:600;line-height:1.35;border-radius:var(--border-radius);background:var(--btnEq-default-color);color:var(--txt-color)}'
+        ].join('')
+        document.head.appendChild(css)
+      }
+
+      /*
+       * La valeur est la ligne composée par summaryOf() : « IC 2137 · 07:12 ·
+       * +7 min · voie 9 ». Le coeur ne transmet au gabarit que cette chaîne, pas
+       * les commandes voisines : tout ce qui est affiché ici en sort.
+       */
+      function sncbnmbsParse(_text) {
+        var found = { vehicle: '', time: '', delay: '', canceled: '', platform: '', plain: '' }
+        var parts = String(_text === null || _text === undefined ? '' : _text).split('·')
+        for (var i = 0; i < parts.length; i++) { parts[i] = parts[i].trim() }
+        /* « Aucun train dans le créneau » est une phrase, pas un train : le
+           deuxième segment est toujours l'heure de départ quand il y en a un. */
+        if (parts.length < 2 || !/^\d{1,2}:\d{2}$/.test(parts[1])) {
+          found.plain = parts.join(' · ')
+          return found
+        }
+        found.vehicle = parts[0]
+        found.time = parts[1]
+        for (var j = 2; j < parts.length; j++) {
+          if (parts[j] === '') { continue }
+          if (parts[j].charAt(0) === '+') { found.delay = parts[j]; continue }
+          /* Le PHP écrit SUPPRIMÉ en capitales et la voie en toutes lettres
+             (« voie 9 », « spoor 9 ») : l'absence de minuscule est le seul repère
+             qui survive à la traduction, le mot lui-même changeant de langue. */
+          if (parts[j] === parts[j].toLocaleUpperCase() && parts[j] !== parts[j].toLocaleLowerCase()) {
+            found.canceled = parts[j]
+            continue
+          }
+          found.platform = parts[j]
+        }
+        return found
+      }
+
+      var sncbnmbsWithPlatform = !(domUtils.issetWidgetOptParam('#platform#', 'platform') && '#platform#' == '0')
+      var sncbnmbsTimeOnly = (domUtils.issetWidgetOptParam('#timeonly#', 'timeonly') && '#timeonly#' != '0')
+
+      jeedom.cmd.addUpdateFunction('#id#', function (_options) {
+        var cmd = document.querySelector('.cmd[data-cmd_uid="#uid#"]')
+        if (!is_object(cmd)) { return }
+
+        var train = sncbnmbsParse(init(_options.value))
+
+        /* Le niveau d'alerte du coeur complète ce que la valeur dit déjà : il
+           peut signaler une situation dégradée là où la ligne reste anodine. */
+        var status = 'ok'
+        if (train.canceled !== '' || _options.alertLevel == 'danger') { status = 'danger' }
+        else if (train.delay !== '' || _options.alertLevel == 'warning') { status = 'warning' }
+        cmd.setAttribute('data-status', status)
+
+        var icon = cmd.querySelector('.sncbnmbsIcon')
+        icon.className = 'fas fa-train sncbnmbsIcon' + ((status === 'danger') ? ' icon_red' : ((status === 'warning') ? ' icon_orange' : ''))
+
+        var vehicle = cmd.querySelector('.sncbnmbsVehicle')
+        /* textContent et non innerHTML : le nom du train vient d'iRail et ne doit
+           jamais être interprété comme du HTML. */
+        vehicle.textContent = (train.plain !== '') ? train.plain : train.vehicle
+        vehicle.style.display = (vehicle.textContent === '' || (sncbnmbsTimeOnly && train.plain === '')) ? 'none' : ''
+
+        var time = cmd.querySelector('.sncbnmbsTime')
+        time.textContent = train.time
+        time.style.display = (train.time === '') ? 'none' : ''
+
+        var delay = cmd.querySelector('.sncbnmbsDelay')
+        delay.className = 'sncbnmbsDelay'
+        if (train.plain !== '') { delay.textContent = '' }
+        else if (train.canceled !== '') { delay.textContent = train.canceled; delay.className += ' label label-danger' }
+        else if (train.delay !== '') { delay.textContent = train.delay; delay.className += ' label label-warning' }
+        /* Chaîne à traduire sans apostrophe : elle traverse un littéral
+           JavaScript, et la contre-oblique d'échappement se retrouverait dans la
+           clé de traduction. */
+        else { delay.textContent = '{{sans retard}}'; delay.className += ' label label-success' }
+        delay.style.display = (delay.textContent === '') ? 'none' : ''
+
+        var platform = cmd.querySelector('.sncbnmbsPlatform')
+        platform.textContent = sncbnmbsWithPlatform ? train.platform : ''
+        platform.style.display = (platform.textContent === '') ? 'none' : ''
+
+        if ('#time#' == 'duration' || '#time#' == 'date') {
+          jeedom.cmd.displayDuration(_options.valueDate, cmd.querySelector('.timeCmd'), '#time#')
+        }
+      })
+
+      /* display_value reste vide : le coeur n'échappe que les apostrophes dans
+         #state#, alors que #value# passe par addslashes et traverse sans dommage
+         un littéral JavaScript. */
+      jeedom.cmd.refreshValue([{ cmd_id: '#id#', value: '#value#', display_value: '', valueDate: '#valueDate#', collectDate: '#collectDate#', alertLevel: '#alertLevel#', unit: '' }])
+    })()
+  </script>
+</div>

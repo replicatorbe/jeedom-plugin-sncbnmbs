@@ -1,0 +1,1422 @@
+<?php
+/* This file is part of Jeedom.
+ *
+ * Jeedom is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Jeedom is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Jeedom. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+require_once __DIR__ . '/../../../../core/php/core.inc.php';
+
+class sncbnmbs extends eqLogic {
+
+    /*
+     * iRail publie les données temps réel de la SNCB. Aucune clé n'est
+     * nécessaire, mais le service demande que chaque appelant s'identifie par
+     * son User-Agent : une requête anonyme peut être refusée sans préavis.
+     *
+     * L'ancienne racine (api.irail.be/connections/) répond aujourd'hui par une
+     * redirection 303 vers /v1/connections. L'appeler directement économise un
+     * aller-retour par requête — et il y en a une par minute et par trajet.
+     */
+    const API_BASE = 'https://api.irail.be/v1';
+
+    /*
+     * La liste des gares ne bouge que quelques fois par an, et pèse 120 ko :
+     * la relire à chaque frappe de l'autocomplete serait absurde.
+     */
+    const STATIONS_TTL = 604800;
+
+    /*
+     * Les perturbations sont mutualisées entre tous les trajets : elles
+     * décrivent le réseau, pas un voyage. Trois minutes suffisent à rester
+     * réactif sans multiplier les appels par le nombre d'équipements.
+     */
+    const DISTURBANCES_TTL = 180;
+
+    /* Les trains du lendemain ne bougent pas à la minute : inutile de les
+     * relire aussi souvent que ceux du jour. */
+    const TOMORROW_TTL = 1800;
+
+    /* Hors fenêtre de surveillance, un rafraîchissement au quart d'heure suffit
+     * à garder la liste du jour à jour sans interroger iRail 1440 fois. */
+    const IDLE_INTERVAL = 900;
+
+    /* Garde-fou contre un scénario qui appellerait « Rafraîchir » en boucle. */
+    const FORCE_MIN_INTERVAL = 20;
+
+    /* Valeurs par défaut d'un trajet neuf. */
+    const DEFAULT_SLOT_START = '07:00';
+    const DEFAULT_SLOT_END   = '09:00';
+    const DEFAULT_MAX_TRAINS = 6;
+    const DEFAULT_THRESHOLD  = 5;
+    const DEFAULT_WATCH_BEFORE = 60;
+
+    /* Bornes de sécurité : iRail est un service gratuit et communautaire. */
+    const MAX_TRAINS = 12;
+    const MAX_WATCH_BEFORE = 240;
+
+    /* Types de problème, par ordre de gravité croissante. */
+    const PROBLEM_DELAY    = 'delay';
+    const PROBLEM_PLATFORM = 'platform';
+    const PROBLEM_CANCELED = 'canceled';
+
+    /* Message de rafraîchissement raté, transmis à l'appelant sans lever
+     * d'exception : le cron ne doit pas s'arrêter au premier trajet en panne. */
+    private $refreshError = '';
+
+    /* ================================================================ WIDGETS */
+
+    /*
+     * Deux gabarits repris du coeur, aux seules icônes changées. « Trajet
+     * perturbé » doit se lire comme une alerte et non comme une coche verte
+     * quand tout va bien. Le coeur remplace les guillemets doubles par des
+     * apostrophes (cmd::getWidgetTemplateCode) : écrire directement en
+     * apostrophes.
+     */
+    public static function templateWidget() {
+        $icons = array(
+            '#_icon_on_#'  => "<i class='icon_red fas fa-exclamation-triangle'></i>",
+            '#_icon_off_#' => "<i class='icon_green fas fa-check'></i>",
+        );
+        return array(
+            'info' => array(
+                'binary' => array(
+                    'trouble'     => array('template' => 'tmplicon',     'replace' => $icons),
+                    'troubleLine' => array('template' => 'tmpliconline', 'replace' => $icons),
+                ),
+            ),
+        );
+    }
+
+    /* ==================================================================== CRON */
+
+    /*
+     * Appelé chaque minute par plugin::cron(). Chaque trajet décide lui-même
+     * s'il doit interroger iRail : surveiller à la minute 24 h sur 24 un trajet
+     * de 7 h du matin ferait 1440 requêtes par jour pour en utiliser 120.
+     */
+    public static function cron() {
+        foreach (self::byType(__CLASS__, true) as $eqLogic) {
+            try {
+                if (!$eqLogic->shouldPoll()) {
+                    /*
+                     * Même sans nouvel appel, les commandes sont recomposées :
+                     * le compte à rebours et « prochain train » changent à
+                     * chaque minute qui passe, pas à chaque réponse d'iRail.
+                     */
+                    $eqLogic->refreshFromCache();
+                    continue;
+                }
+                $eqLogic->update();
+            } catch (Throwable $e) {
+                // Un trajet en échec ne doit pas priver les autres de leur tour.
+                log::add(__CLASS__, 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
+            }
+        }
+    }
+
+    /* Faut-il interroger iRail pour ce trajet, maintenant ? */
+    public function shouldPoll($_now = null) {
+        if (!$this->isConfigured()) {
+            return false;
+        }
+        $now = ($_now === null) ? time() : $_now;
+        $cache = $this->getJourneys();
+        $age = $now - (isset($cache['fetchedAt']) ? $cache['fetchedAt'] : 0);
+
+        if ($this->isWatching($now)) {
+            return $age >= 55;
+        }
+        return $age >= self::IDLE_INTERVAL;
+    }
+
+    /*
+     * Dans la fenêtre de surveillance : le créneau du jour, élargi en amont de
+     * watch_before minutes pour que l'utilisateur soit prévenu avant de partir
+     * de chez lui, et non sur le quai.
+     */
+    public function isWatching($_now = null) {
+        $now = ($_now === null) ? time() : $_now;
+        if ($this->getConfiguration('watch_enabled', 1) == 0) {
+            return false;
+        }
+        foreach ($this->slots($now) as $slot) {
+            $before = $slot['start'] - ($this->watchBefore() * 60);
+            if ($now >= $before && $now <= $slot['end']) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /* ===================================================== CYCLE DE VIE eqLogic */
+
+    public function preSave() {
+        /*
+         * Aucune exception ici : le coeur crée l'équipement avec son seul nom.
+         * Toute validation rendrait le bouton « Ajouter » définitivement
+         * inopérant. Un trajet incomplet est signalé au centre de messages au
+         * moment du rafraîchissement.
+         */
+        foreach (array(
+            'slot_start'   => self::DEFAULT_SLOT_START,
+            'slot_end'     => self::DEFAULT_SLOT_END,
+            'max_trains'   => self::DEFAULT_MAX_TRAINS,
+            'threshold'    => self::DEFAULT_THRESHOLD,
+            'watch_before' => self::DEFAULT_WATCH_BEFORE,
+            'watch_enabled' => 1,
+        ) as $key => $default) {
+            if ($this->getConfiguration($key, '') === '') {
+                $this->setConfiguration($key, $default);
+            }
+        }
+    }
+
+    public function postSave() {
+        $this->createCommands();
+
+        if (!$this->isConfigured()) {
+            return;
+        }
+        try {
+            /*
+             * Relire iRail à chaque enregistrement ferait un appel pour un
+             * simple changement de nom ou d'icône. Seul un trajet réellement
+             * différent justifie de tout reprendre — et il faut alors oublier
+             * les alertes déjà envoyées, qui parlaient d'un autre voyage.
+             */
+            $journeys = $this->getJourneys();
+            $changed = !isset($journeys['signature']) || $journeys['signature'] !== $this->signature();
+            if ($changed) {
+                $this->clearAlertState();
+            }
+            $this->update($changed);
+        } catch (Throwable $e) {
+            // L'enregistrement ne doit pas échouer parce qu'iRail est
+            // indisponible : le trajet est valide, le cron réessaiera.
+            log::add(__CLASS__, 'error', $this->getHumanName() . ' : ' . $e->getMessage());
+        }
+    }
+
+    public function preRemove() {
+        /*
+         * DB::remove() met l'id à null avant postRemove : les caches doivent
+         * être nettoyés tant que l'identifiant est encore lisible.
+         */
+        $this->clearJourneys();
+        $this->clearAlertState();
+        // Sans cela le message reste au centre de messages avec un identifiant
+        // qu'aucun code ne pourra plus faire correspondre.
+        $this->clearProblem();
+        return true;
+    }
+
+    /* Le trajet est-il exploitable ? */
+    public function isConfigured() {
+        $from = trim($this->getConfiguration('from_id', ''));
+        $to = trim($this->getConfiguration('to_id', ''));
+        /*
+         * Deux fois la même gare n'est pas seulement absurde : iRail part alors
+         * en timeout et répond 504 au bout de trente secondes. À raison d'une
+         * requête par minute, cela bloquerait le cron de tous les plugins.
+         */
+        return $from != '' && $to != '' && $from !== $to;
+    }
+
+    /* La raison pour laquelle le trajet n'est pas exploitable, en clair. */
+    public function configurationError() {
+        $from = trim($this->getConfiguration('from_id', ''));
+        $to = trim($this->getConfiguration('to_id', ''));
+        if ($from == '' || $to == '') {
+            return __('Trajet incomplet : choisissez une gare de départ et une gare d\'arrivée.', __FILE__);
+        }
+        if ($from === $to) {
+            return __('La gare de départ et la gare d\'arrivée sont les mêmes.', __FILE__);
+        }
+        return '';
+    }
+
+    /* ================================================================ COMMANDES */
+
+    /* Crée les commandes manquantes sans jamais écraser la personnalisation. */
+    private function addCmdIfMissing($_logicalId, $_name, $_type, $_subType, $_options = array()) {
+        $cmd = $this->getCmd(null, $_logicalId);
+        if (is_object($cmd)) {
+            return $cmd;
+        }
+        $cmd = new sncbnmbsCmd();
+        $cmd->setEqLogic_id($this->getId());
+        $cmd->setLogicalId($_logicalId);
+        /*
+         * La table cmd impose l'unicité du couple (eqLogic_id, name) : un nom
+         * déjà pris ferait échouer l'enregistrement de tout l'équipement. On
+         * suffixe plutôt que de laisser planter.
+         */
+        $name = __($_name, __FILE__);
+        if (is_object(cmd::byEqLogicIdCmdName($this->getId(), $name))) {
+            $name .= ' (' . $_logicalId . ')';
+        }
+        $cmd->setName($name);
+        $cmd->setType($_type);
+        $cmd->setSubType($_subType);
+        $cmd->setIsVisible(isset($_options['isVisible']) ? $_options['isVisible'] : 0);
+        $cmd->setIsHistorized(isset($_options['isHistorized']) ? $_options['isHistorized'] : 0);
+        if (isset($_options['order'])) {
+            $cmd->setOrder($_options['order']);
+        }
+        if (isset($_options['unite'])) {
+            $cmd->setUnite($_options['unite']);
+        }
+        if (isset($_options['generic'])) {
+            $cmd->setGeneric_type($_options['generic']);
+        }
+        if (isset($_options['icon'])) {
+            $cmd->setDisplay('icon', '<i class="' . $_options['icon'] . '"></i>');
+        }
+        if (isset($_options['template'])) {
+            $cmd->setTemplate('dashboard', $_options['template']);
+            $cmd->setTemplate('mobile', $_options['template']);
+        }
+        $cmd->save();
+        return $cmd;
+    }
+
+    /*
+     * Vingt-trois commandes, dont trois visibles seulement. Un navetteur veut
+     * voir « son » train sur le dashboard, pas une colonne de vingt tuiles ;
+     * les autres restent disponibles pour les scénarios et se réaffichent d'un
+     * clic dans la configuration avancée.
+     */
+    private function createCommands() {
+        $order = 0;
+
+        $this->addCmdIfMissing('summary', 'Prochain train', 'info', 'string', array(
+            'order' => $order++, 'isVisible' => 1,
+            'template' => 'sncbnmbs::sncbnmbs',
+        ));
+        $delay = $this->addCmdIfMissing('next_delay', 'Retard du prochain train', 'info', 'numeric', array(
+            'order' => $order++, 'isVisible' => 1, 'isHistorized' => 1, 'unite' => 'min',
+            'icon' => 'fas fa-hourglass-half',
+        ));
+        /*
+         * Les seuils ne sont posés qu'à la création : ils colorent la tuile sans
+         * aucun réglage, mais l'utilisateur qui les change ensuite doit garder
+         * la main. Le seuil « danger » suit celui du trajet, pour que la couleur
+         * et la notification disent la même chose.
+         */
+        if ($delay->getAlert('warningif') == '' && $delay->getAlert('dangerif') == '') {
+            $delay->setAlert('warningif', '#value# >= 1');
+            $delay->setAlert('dangerif', '#value# >= ' . $this->threshold());
+            $delay->save();
+        }
+        $this->addCmdIfMissing('disturbed', 'Trajet perturbé', 'info', 'binary', array(
+            'order' => $order++, 'isVisible' => 1,
+            'template' => 'sncbnmbs::troubleLine',
+        ));
+
+        /* ------------------------------------------------- le prochain train */
+        $this->addCmdIfMissing('next_time', 'Départ prévu', 'info', 'string', array('order' => $order++));
+        $this->addCmdIfMissing('next_real', 'Départ réel', 'info', 'string', array('order' => $order++));
+        $this->addCmdIfMissing('next_countdown', 'Départ dans', 'info', 'numeric', array(
+            'order' => $order++, 'unite' => 'min',
+        ));
+        $this->addCmdIfMissing('next_vehicle', 'Train', 'info', 'string', array('order' => $order++));
+        $this->addCmdIfMissing('next_direction', 'Direction', 'info', 'string', array('order' => $order++));
+        $this->addCmdIfMissing('next_platform', 'Voie', 'info', 'string', array('order' => $order++));
+        $this->addCmdIfMissing('next_platform_changed', 'Changement de voie', 'info', 'binary', array(
+            'order' => $order++, 'template' => 'sncbnmbs::troubleLine',
+        ));
+        $this->addCmdIfMissing('next_canceled', 'Prochain train supprimé', 'info', 'binary', array(
+            'order' => $order++, 'template' => 'sncbnmbs::troubleLine',
+        ));
+        $this->addCmdIfMissing('next_arrival', 'Arrivée prévue', 'info', 'string', array('order' => $order++));
+        $this->addCmdIfMissing('next_duration', 'Durée du trajet', 'info', 'numeric', array(
+            'order' => $order++, 'unite' => 'min',
+        ));
+        $this->addCmdIfMissing('next_transfers', 'Correspondances', 'info', 'numeric', array('order' => $order++));
+        $this->addCmdIfMissing('next_occupancy', 'Occupation', 'info', 'string', array('order' => $order++));
+
+        /* ------------------------------------------------- l'état du créneau */
+        $this->addCmdIfMissing('trains_count', 'Trains du créneau', 'info', 'numeric', array('order' => $order++));
+        $this->addCmdIfMissing('trains_delayed', 'Trains en retard', 'info', 'numeric', array(
+            'order' => $order++, 'isHistorized' => 1,
+        ));
+        $this->addCmdIfMissing('trains_canceled', 'Trains supprimés', 'info', 'numeric', array(
+            'order' => $order++, 'isHistorized' => 1,
+        ));
+        $this->addCmdIfMissing('delay_max', 'Retard maximum', 'info', 'numeric', array(
+            'order' => $order++, 'unite' => 'min',
+        ));
+        $this->addCmdIfMissing('alert_message', 'Message de perturbation', 'info', 'string', array('order' => $order++));
+        $this->addCmdIfMissing('last_update', 'Dernière vérification', 'info', 'string', array('order' => $order++));
+
+        /* ------------------------------------------------------------ actions */
+        $this->addCmdIfMissing('refresh', 'Rafraîchir', 'action', 'other', array(
+            'order' => $order++, 'isVisible' => 1, 'icon' => 'fas fa-sync',
+        ));
+        $this->addCmdIfMissing('acknowledge', 'Acquitter l\'alerte', 'action', 'other', array(
+            'order' => $order++, 'icon' => 'fas fa-bell-slash',
+        ));
+    }
+
+    /*
+     * checkAndUpdateCmd() n'écrit que si la valeur change, et c'est ce qui
+     * déclenche les scénarios sur événement. On ne remplace jamais une valeur
+     * connue par du vide sur un simple raté réseau : le dashboard se viderait
+     * à la première coupure.
+     */
+    private function setCmd($_logicalId, $_value) {
+        if ($_value === '' || $_value === null) {
+            $cmd = $this->getCmd(null, $_logicalId);
+            if (is_object($cmd) && $cmd->execCmd() === '') {
+                return;
+            }
+        }
+        $this->checkAndUpdateCmd($_logicalId, $_value);
+    }
+
+    /* =============================================================== LECTURE */
+
+    /*
+     * Interroge iRail et recompose tout. $_force ignore l'âge du cache, sans
+     * jamais descendre sous FORCE_MIN_INTERVAL : un scénario en boucle ne doit
+     * pas faire de ce plugin un client abusif.
+     */
+    public function update($_force = false) {
+        $this->refreshError = '';
+        if (!$this->isConfigured()) {
+            $this->refreshError = $this->configurationError();
+            $this->reportProblem($this->refreshError);
+            return array();
+        }
+
+        $previous = $this->getJourneys();
+        $now = time();
+        if ($_force && ($now - (isset($previous['fetchedAt']) ? $previous['fetchedAt'] : 0)) < self::FORCE_MIN_INTERVAL) {
+            $_force = false;
+        }
+
+        try {
+            $journeys = $this->fetchJourneys($previous, $_force);
+        } catch (Throwable $e) {
+            /*
+             * Une panne d'iRail ne doit pas effacer ce qu'on sait déjà : les
+             * commandes sont recomposées depuis le cache, avec l'heure de la
+             * dernière lecture réussie. L'erreur remonte à l'appelant.
+             */
+            $this->refreshError = $e->getMessage();
+            $this->reportProblem($e->getMessage());
+            $this->refreshFromCache();
+            return $previous;
+        }
+
+        $this->clearProblem();
+        $this->saveJourneys($journeys);
+        $this->refreshCommands($journeys);
+        $this->checkAlerts($journeys);
+        return $journeys;
+    }
+
+    /* Recompose les commandes sans appeler iRail. */
+    public function refreshFromCache() {
+        $journeys = $this->getJourneys();
+        if (empty($journeys)) {
+            return;
+        }
+        $this->refreshCommands($journeys);
+        $this->checkAlerts($journeys);
+    }
+
+    /*
+     * Les trains du jour et ceux du lendemain viennent de deux requêtes
+     * distinctes : iRail ne répond que pour une date à la fois. Celle du
+     * lendemain n'est refaite que toutes les demi-heures, son contenu ne
+     * changeant pas à la minute.
+     */
+    private function fetchJourneys($_previous, $_force = false) {
+        $now = time();
+        $trains = array();
+        $failures = array();
+
+        foreach ($this->slots($now, 2) as $index => $slot) {
+            $stale = true;
+            if ($index > 0 && !$_force) {
+                $age = $now - (isset($_previous['tomorrowAt']) ? $_previous['tomorrowAt'] : 0);
+                $stale = ($age >= self::TOMORROW_TTL);
+            }
+
+            if (!$stale) {
+                // Réutiliser tels quels les trains déjà connus pour ce jour.
+                foreach (isset($_previous['trains']) ? $_previous['trains'] : array() as $train) {
+                    if ($train['slot'] == $index) {
+                        $trains[] = $train;
+                    }
+                }
+                continue;
+            }
+
+            try {
+                $found = $this->fetchSlot($slot, $index);
+                $trains = array_merge($trains, $found);
+                if ($index > 0) {
+                    $tomorrowAt = $now;
+                }
+            } catch (Throwable $e) {
+                /*
+                 * Le jour même prime : si c'est lui qui échoue, il n'y a rien à
+                 * afficher et l'erreur doit remonter. Un échec sur le lendemain
+                 * laisse le trajet parfaitement utilisable.
+                 */
+                if ($index == 0) {
+                    throw $e;
+                }
+                $failures[] = $e->getMessage();
+                log::add(__CLASS__, 'debug', $this->getHumanName() . ' : ' . $e->getMessage());
+            }
+        }
+
+        usort($trains, array(__CLASS__, 'compareTrains'));
+
+        return array(
+            'fetchedAt'  => $now,
+            'tomorrowAt' => isset($tomorrowAt) ? $tomorrowAt : (isset($_previous['tomorrowAt']) ? $_previous['tomorrowAt'] : 0),
+            'signature'  => $this->signature(),
+            'trains'     => $trains,
+            'warnings'   => $failures,
+        );
+    }
+
+    /* Les trains d'un créneau, filtrés sur l'heure de départ prévue. */
+    private function fetchSlot($_slot, $_index) {
+        $params = array(
+            'from'    => $this->getConfiguration('from_id'),
+            'to'      => $this->getConfiguration('to_id'),
+            'date'    => date('dmy', $_slot['start']),
+            'time'    => date('Hi', $_slot['start']),
+            'timesel' => 'departure',
+            'alerts'  => 'true',
+            'results' => $this->maxTrains(),
+        );
+        $data = self::call('connections', $params);
+
+        $trains = array();
+        $connections = isset($data['connection']) ? $data['connection'] : array();
+        if (isset($connections['id'])) {
+            // iRail rend un objet nu quand il n'y a qu'un seul résultat.
+            $connections = array($connections);
+        }
+        foreach ($connections as $connection) {
+            $train = self::parseConnection($connection, $_index);
+            if ($train === null) {
+                continue;
+            }
+            /*
+             * iRail rend les N connexions suivant l'heure demandée, sans borne
+             * haute : sans ce filtre, un créneau de 7 h à 9 h remonterait aussi
+             * le train de 11 h et déclencherait des alertes hors sujet.
+             */
+            if ($train['depTs'] > $_slot['end']) {
+                continue;
+            }
+            $trains[] = $train;
+        }
+        return $trains;
+    }
+
+    /*
+     * Tout arrive en chaînes chez iRail, y compris les nombres et les booléens.
+     * Les délais sont en secondes, les heures en timestamps Unix.
+     */
+    public static function parseConnection($_connection, $_slot = 0) {
+        if (!isset($_connection['departure']['time'])) {
+            return null;
+        }
+        $departure = $_connection['departure'];
+        $arrival = isset($_connection['arrival']) ? $_connection['arrival'] : array();
+
+        /*
+         * Les alertes d'iRail portent une période de validité : beaucoup
+         * concernent des travaux programmés des semaines plus tard. Les
+         * afficher toutes ferait du champ « perturbation » un bruit permanent
+         * que plus personne ne lirait.
+         */
+        $now = time();
+        $alerts = array();
+        foreach (self::itemsOf($_connection, 'alerts', 'alert') as $alert) {
+            if (isset($alert['startTime']) && (int) $alert['startTime'] > $now) {
+                continue;
+            }
+            if (isset($alert['endTime']) && (int) $alert['endTime'] > 0 && (int) $alert['endTime'] < $now) {
+                continue;
+            }
+            $text = isset($alert['header']) ? $alert['header'] : (isset($alert['description']) ? $alert['description'] : '');
+            if (trim($text) != '') {
+                $alerts[] = trim($text);
+            }
+        }
+        foreach (self::itemsOf($_connection, 'remarks', 'remark') as $remark) {
+            $text = isset($remark['header']) ? $remark['header'] : (isset($remark['description']) ? $remark['description'] : '');
+            if (trim($text) != '') {
+                $alerts[] = trim($text);
+            }
+        }
+
+        $depTs = (int) $departure['time'];
+        $vehicle = isset($departure['vehicleinfo']['shortname']) ? $departure['vehicleinfo']['shortname']
+            : (isset($departure['vehicle']) ? str_replace('BE.NMBS.', '', $departure['vehicle']) : '?');
+
+        return array(
+            /*
+             * La clé identifie un train dans le temps : le même IC 2137 revient
+             * tous les jours, et une alerte d'hier ne doit pas éteindre celle
+             * d'aujourd'hui.
+             */
+            'key'        => $vehicle . '@' . $depTs,
+            'slot'       => $_slot,
+            'vehicle'    => $vehicle,
+            'vehicleId'  => isset($departure['vehicle']) ? $departure['vehicle'] : '',
+            'depTs'      => $depTs,
+            'depDelay'   => isset($departure['delay']) ? (int) $departure['delay'] : 0,
+            'depPlatform' => isset($departure['platform']) ? $departure['platform'] : '',
+            'depPlatformNormal' => !isset($departure['platforminfo']['normal']) || $departure['platforminfo']['normal'] == '1',
+            'depCanceled' => isset($departure['canceled']) && $departure['canceled'] == '1',
+            'left'       => isset($departure['left']) && $departure['left'] == '1',
+            'direction'  => isset($departure['direction']['name']) ? $departure['direction']['name'] : '',
+            'occupancy'  => isset($departure['occupancy']['name']) ? $departure['occupancy']['name'] : '',
+            'arrTs'      => isset($arrival['time']) ? (int) $arrival['time'] : 0,
+            'arrDelay'   => isset($arrival['delay']) ? (int) $arrival['delay'] : 0,
+            'arrPlatform' => isset($arrival['platform']) ? $arrival['platform'] : '',
+            'arrCanceled' => isset($arrival['canceled']) && $arrival['canceled'] == '1',
+            'arrived'    => isset($arrival['arrived']) && $arrival['arrived'] == '1',
+            'duration'   => isset($_connection['duration']) ? (int) $_connection['duration'] : 0,
+            'transfers'  => isset($_connection['vias']['number']) ? (int) $_connection['vias']['number'] : 0,
+            'alerts'     => $alerts,
+        );
+    }
+
+    /*
+     * iRail emballe ses listes dans { number: "2", <singulier>: [...] } et rend
+     * l'objet nu quand il n'y en a qu'un. Sans cette normalisation, un foreach
+     * parcourrait les clés d'un seul élément.
+     */
+    private static function itemsOf($_parent, $_plural, $_singular) {
+        if (!isset($_parent[$_plural][$_singular])) {
+            return array();
+        }
+        $items = $_parent[$_plural][$_singular];
+        if (!is_array($items)) {
+            return array();
+        }
+        if (isset($items['id']) || isset($items['header']) || isset($items['description'])) {
+            return array($items);
+        }
+        return $items;
+    }
+
+    private static function compareTrains($_a, $_b) {
+        if ($_a['depTs'] == $_b['depTs']) {
+            return 0;
+        }
+        return ($_a['depTs'] < $_b['depTs']) ? -1 : 1;
+    }
+
+    /* ============================================================= COMMANDES */
+
+    private function refreshCommands($_journeys) {
+        $now = time();
+        $trains = isset($_journeys['trains']) ? $_journeys['trains'] : array();
+        $next = $this->nextTrain($trains, $now);
+
+        $count = count($trains);
+        $delayed = 0;
+        $canceled = 0;
+        $maxDelay = 0;
+        $messages = array();
+
+        foreach ($trains as $train) {
+            if ($train['depCanceled'] || $train['arrCanceled']) {
+                $canceled++;
+            }
+            $delay = self::minutes($train['depDelay']);
+            if ($delay > 0) {
+                $delayed++;
+            }
+            if ($delay > $maxDelay) {
+                $maxDelay = $delay;
+            }
+            foreach ($train['alerts'] as $alert) {
+                $messages[] = $train['vehicle'] . ' : ' . $alert;
+            }
+        }
+
+        /*
+         * Les perturbations réseau complètent les alertes attachées aux trains :
+         * une ligne coupée est annoncée là avant que les trains ne soient
+         * marqués supprimés.
+         */
+        foreach ($this->matchingDisturbances() as $disturbance) {
+            $messages[] = $disturbance;
+        }
+
+        $this->setCmd('trains_count', $count);
+        $this->setCmd('trains_delayed', $delayed);
+        $this->setCmd('trains_canceled', $canceled);
+        $this->setCmd('delay_max', $maxDelay);
+        $this->setCmd('alert_message', implode(' — ', array_slice(array_unique($messages), 0, 3)));
+        $this->setCmd('last_update', date('d/m/Y H:i', isset($_journeys['fetchedAt']) ? $_journeys['fetchedAt'] : $now));
+
+        if ($next === null) {
+            $this->setCmd('summary', __('Aucun train dans le créneau', __FILE__));
+            $this->setCmd('next_time', '');
+            $this->setCmd('next_real', '');
+            $this->setCmd('next_delay', 0);
+            $this->setCmd('next_countdown', -1);
+            $this->setCmd('next_vehicle', '');
+            $this->setCmd('next_direction', '');
+            $this->setCmd('next_platform', '');
+            $this->setCmd('next_platform_changed', 0);
+            $this->setCmd('next_canceled', 0);
+            $this->setCmd('next_arrival', '');
+            $this->setCmd('next_duration', 0);
+            $this->setCmd('next_transfers', 0);
+            $this->setCmd('next_occupancy', '');
+            $this->setCmd('disturbed', ($canceled > 0 || $maxDelay >= $this->threshold()) ? 1 : 0);
+            return;
+        }
+
+        $delay = self::minutes($next['depDelay']);
+        $realTs = $next['depTs'] + $next['depDelay'];
+
+        $this->setCmd('next_time', date('H:i', $next['depTs']));
+        $this->setCmd('next_real', date('H:i', $realTs));
+        $this->setCmd('next_delay', $delay);
+        $this->setCmd('next_countdown', (int) floor(($realTs - $now) / 60));
+        $this->setCmd('next_vehicle', $next['vehicle']);
+        $this->setCmd('next_direction', $next['direction']);
+        $this->setCmd('next_platform', ($next['depPlatform'] == '?') ? '' : $next['depPlatform']);
+        $this->setCmd('next_platform_changed', $next['depPlatformNormal'] ? 0 : 1);
+        $this->setCmd('next_canceled', ($next['depCanceled'] || $next['arrCanceled']) ? 1 : 0);
+        $this->setCmd('next_arrival', ($next['arrTs'] > 0) ? date('H:i', $next['arrTs'] + $next['arrDelay']) : '');
+        $this->setCmd('next_duration', self::minutes($next['duration']));
+        $this->setCmd('next_transfers', $next['transfers']);
+        $this->setCmd('next_occupancy', self::occupancyLabel($next['occupancy']));
+        $this->setCmd('summary', $this->summaryOf($next));
+        $this->setCmd('disturbed', $this->isDisturbed($next, $canceled, $maxDelay) ? 1 : 0);
+    }
+
+    /*
+     * Le prochain train est le premier qui n'est pas encore parti. Une minute de
+     * battement après l'heure réelle : un train qu'on vient de rater n'est plus
+     * « le prochain », et iRail ne lève pas toujours son drapeau « left ».
+     */
+    private function nextTrain($_trains, $_now = null) {
+        $now = ($_now === null) ? time() : $_now;
+        foreach ($_trains as $train) {
+            if ($train['left']) {
+                continue;
+            }
+            if (($train['depTs'] + $train['depDelay']) < ($now - 60)) {
+                continue;
+            }
+            return $train;
+        }
+        return null;
+    }
+
+    private function isDisturbed($_train, $_canceled, $_maxDelay) {
+        if ($_train['depCanceled'] || $_train['arrCanceled'] || !$_train['depPlatformNormal']) {
+            return true;
+        }
+        if (count($_train['alerts']) > 0) {
+            return true;
+        }
+        $threshold = $this->threshold();
+        return (self::minutes($_train['depDelay']) >= $threshold) || ($_canceled > 0) || ($_maxDelay >= $threshold);
+    }
+
+    /* Une ligne lisible d'un coup d'oeil sur le dashboard. */
+    private function summaryOf($_train) {
+        $parts = array($_train['vehicle'], date('H:i', $_train['depTs']));
+        $delay = self::minutes($_train['depDelay']);
+        if ($_train['depCanceled'] || $_train['arrCanceled']) {
+            $parts[] = __('SUPPRIMÉ', __FILE__);
+        } elseif ($delay > 0) {
+            $parts[] = '+' . $delay . ' ' . __('min', __FILE__);
+        }
+        if ($_train['depPlatform'] != '' && $_train['depPlatform'] != '?') {
+            $parts[] = __('voie', __FILE__) . ' ' . $_train['depPlatform'];
+        }
+        return implode(' · ', $parts);
+    }
+
+    /* ================================================================ ALERTES */
+
+    /*
+     * Compare l'état courant à ce qui a déjà été signalé, et n'agit que sur la
+     * nouveauté. Sans cette mémoire, un train en retard de vingt minutes
+     * enverrait vingt notifications, une par passage du cron.
+     */
+    private function checkAlerts($_journeys) {
+        $state = $this->getAlertState();
+        $trains = isset($_journeys['trains']) ? $_journeys['trains'] : array();
+        $threshold = $this->threshold();
+        $now = time();
+        $notified = isset($state['notified']) ? $state['notified'] : array();
+        $acknowledged = isset($state['acknowledged']) ? $state['acknowledged'] : array();
+        $fresh = array();
+        $stillAcknowledged = array();
+        $events = array();
+
+        foreach ($trains as $train) {
+            /*
+             * Un train déjà parti ne peut plus être manqué : continuer à alerter
+             * dessus ne ferait que retarder l'alerte sur le suivant.
+             */
+            if ($train['left'] || ($train['depTs'] + $train['depDelay']) < $now) {
+                continue;
+            }
+            $problem = $this->problemOf($train, $threshold);
+            if ($problem === null) {
+                continue;
+            }
+            $fresh[$train['key']] = $problem['signature'];
+
+            /*
+             * Un train acquitté le reste tant qu'il est au tableau. C'est bien
+             * ce qu'on attend d'un acquittement : « j'ai vu, ne me préviens plus
+             * pour celui-là » — y compris si son retard s'aggrave encore. Le
+             * train disparaît du tableau une fois parti, et l'acquittement avec
+             * lui : le lendemain, le même IC alerte de nouveau.
+             */
+            if (isset($acknowledged[$train['key']])) {
+                $stillAcknowledged[$train['key']] = true;
+                continue;
+            }
+            if (isset($notified[$train['key']]) && $notified[$train['key']] === $problem['signature']) {
+                continue;
+            }
+            $events[] = $problem;
+        }
+
+        $state['notified'] = $fresh;
+        $state['acknowledged'] = $stillAcknowledged;
+        $this->saveAlertState($state);
+
+        if (empty($events)) {
+            return;
+        }
+
+        $message = $this->alertMessage($events);
+        log::add(__CLASS__, 'info', $this->getHumanName() . ' : ' . $message);
+        $this->runAlertCmd($message);
+    }
+
+    /* Le problème d'un train, ou null s'il n'y en a pas. */
+    private function problemOf($_train, $_threshold) {
+        if ($_train['depCanceled'] || $_train['arrCanceled']) {
+            return array(
+                'type'      => self::PROBLEM_CANCELED,
+                'signature' => self::PROBLEM_CANCELED,
+                'train'     => $_train,
+                'text'      => sprintf(__('%s de %s supprimé', __FILE__), $_train['vehicle'], date('H:i', $_train['depTs'])),
+            );
+        }
+        $delay = self::minutes($_train['depDelay']);
+        if ($delay >= $_threshold) {
+            return array(
+                'type'      => self::PROBLEM_DELAY,
+                /*
+                 * La signature contient le retard : un train qui passe de 5 à
+                 * 25 minutes justifie une seconde alerte, l'utilisateur ayant
+                 * peut-être déjà décidé de partir sur la foi de la première.
+                 */
+                'signature' => self::PROBLEM_DELAY . ':' . (10 * (int) floor($delay / 10)),
+                'train'     => $_train,
+                'text'      => sprintf(__('%s de %s : +%s min', __FILE__), $_train['vehicle'], date('H:i', $_train['depTs']), $delay),
+            );
+        }
+        if (!$_train['depPlatformNormal']) {
+            return array(
+                'type'      => self::PROBLEM_PLATFORM,
+                'signature' => self::PROBLEM_PLATFORM . ':' . $_train['depPlatform'],
+                'train'     => $_train,
+                'text'      => sprintf(__('%s de %s : voie %s au lieu de la voie habituelle', __FILE__), $_train['vehicle'], date('H:i', $_train['depTs']), $_train['depPlatform']),
+            );
+        }
+        return null;
+    }
+
+    private function alertMessage($_events) {
+        $texts = array();
+        foreach ($_events as $event) {
+            $texts[] = $event['text'];
+        }
+        return $this->routeLabel() . ' — ' . implode(', ', array_slice($texts, 0, 3));
+    }
+
+    /*
+     * La commande d'action choisie par l'utilisateur : une notification, un
+     * message, une lampe. C'est le « faire quelque chose » du plugin ; tout le
+     * reste n'est que valeurs exposées aux scénarios.
+     */
+    private function runAlertCmd($_message) {
+        $cmdId = trim($this->getConfiguration('alert_cmd', ''));
+        if ($cmdId == '') {
+            return;
+        }
+        try {
+            $cmd = cmd::byId(str_replace('#', '', $cmdId));
+            if (!is_object($cmd)) {
+                throw new Exception(__('Commande d\'alerte introuvable :', __FILE__) . ' ' . $cmdId);
+            }
+            $cmd->execCmd(array(
+                'title'   => __('Train', __FILE__) . ' — ' . $this->getName(),
+                'message' => $_message,
+            ));
+        } catch (Throwable $e) {
+            log::add(__CLASS__, 'error', $this->getHumanName() . ' : ' . $e->getMessage());
+        }
+    }
+
+    /*
+     * Fait taire les alertes des trains actuellement en défaut. Un problème sur
+     * un autre train, lui, alerte toujours : acquitter dit « j'ai vu ce
+     * retard-là », pas « ne me préviens plus de rien ».
+     */
+    public function acknowledge() {
+        $state = $this->getAlertState();
+        $acknowledged = isset($state['acknowledged']) ? $state['acknowledged'] : array();
+        $journeys = $this->getJourneys();
+        $threshold = $this->threshold();
+        $now = time();
+
+        foreach (isset($journeys['trains']) ? $journeys['trains'] : array() as $train) {
+            if ($train['left'] || ($train['depTs'] + $train['depDelay']) < $now) {
+                continue;
+            }
+            if ($this->problemOf($train, $threshold) === null) {
+                continue;
+            }
+            $acknowledged[$train['key']] = true;
+        }
+
+        $state['acknowledged'] = $acknowledged;
+        $this->saveAlertState($state);
+        return count($acknowledged);
+    }
+
+    /* ============================================================ PERTURBATIONS */
+
+    /*
+     * Rapproche les perturbations du réseau des deux gares du trajet. iRail ne
+     * publie pas la liste des gares concernées : le titre, lui, porte presque
+     * toujours les noms des extrémités de la portion coupée (« Malines -
+     * Termonde : ... »). C'est approximatif, et c'est tout ce que la source
+     * permet — un faux positif informe, un faux négatif laisse sur le quai.
+     */
+    public function matchingDisturbances() {
+        $names = array();
+        foreach (array('from_label', 'to_label') as $key) {
+            $label = self::normalize($this->getConfiguration($key, ''));
+            if ($label != '') {
+                $names[] = $label;
+            }
+        }
+        if (empty($names)) {
+            return array();
+        }
+
+        $matches = array();
+        foreach (self::disturbances() as $disturbance) {
+            $haystack = self::normalize(
+                (isset($disturbance['title']) ? $disturbance['title'] : '') . ' ' .
+                (isset($disturbance['description']) ? $disturbance['description'] : '')
+            );
+            foreach ($names as $name) {
+                if (strpos($haystack, $name) !== false) {
+                    $matches[] = isset($disturbance['title']) ? $disturbance['title'] : '';
+                    break;
+                }
+            }
+        }
+        return array_values(array_filter(array_unique($matches)));
+    }
+
+    /* =================================================================== CACHE */
+
+    private function journeyKey() {
+        return __CLASS__ . '::journeys::' . $this->getId();
+    }
+
+    private function alertKey() {
+        return __CLASS__ . '::alerts::' . $this->getId();
+    }
+
+    public function getJourneys() {
+        $cache = cache::byKey($this->journeyKey());
+        $value = $cache->getValue();
+        if (!is_array($value)) {
+            return array();
+        }
+        return $value;
+    }
+
+    private function saveJourneys($_journeys) {
+        // Deux jours de durée de vie : au-delà, les horaires mémorisés sont
+        // ceux d'avant-hier et ne valent plus rien.
+        cache::set($this->journeyKey(), $_journeys, 172800);
+    }
+
+    private function clearJourneys() {
+        $cache = cache::byKey($this->journeyKey());
+        if (is_object($cache)) {
+            $cache->remove();
+        }
+    }
+
+    private function getAlertState() {
+        $cache = cache::byKey($this->alertKey());
+        $value = $cache->getValue();
+        if (!is_array($value)) {
+            return array('notified' => array());
+        }
+        return $value;
+    }
+
+    private function saveAlertState($_state) {
+        cache::set($this->alertKey(), $_state, 172800);
+    }
+
+    private function clearAlertState() {
+        $cache = cache::byKey($this->alertKey());
+        if (is_object($cache)) {
+            $cache->remove();
+        }
+    }
+
+    /* ================================================================ MESSAGES */
+
+    private function reportProblem($_text) {
+        $text = $this->getHumanName() . ' ' . $_text;
+        log::add(__CLASS__, 'error', $text);
+        /*
+         * message::save() ne met à jour que la date et le compteur d'un message
+         * existant, jamais son texte : sans cet effacement préalable, la
+         * première cause resterait affichée pour toujours.
+         */
+        message::removeAll(__CLASS__, 'journey' . $this->getId());
+        message::add(__CLASS__, $text, '', 'journey' . $this->getId());
+    }
+
+    private function clearProblem() {
+        message::removeAll(__CLASS__, 'journey' . $this->getId());
+    }
+
+    public function getRefreshError() {
+        return $this->refreshError;
+    }
+
+    /* ================================================================= RÉGLAGES */
+
+    public function routeLabel() {
+        $from = $this->getConfiguration('from_label', $this->getConfiguration('from_id', '?'));
+        $to = $this->getConfiguration('to_label', $this->getConfiguration('to_id', '?'));
+        return $from . ' → ' . $to;
+    }
+
+    public function threshold() {
+        return max(1, (int) $this->getConfiguration('threshold', self::DEFAULT_THRESHOLD));
+    }
+
+    public function maxTrains() {
+        return min(self::MAX_TRAINS, max(1, (int) $this->getConfiguration('max_trains', self::DEFAULT_MAX_TRAINS)));
+    }
+
+    public function watchBefore() {
+        return min(self::MAX_WATCH_BEFORE, max(0, (int) $this->getConfiguration('watch_before', self::DEFAULT_WATCH_BEFORE)));
+    }
+
+    /* Les jours retenus, en numérotation ISO (1 = lundi). Aucun coché = tous. */
+    public function activeDays() {
+        $days = array();
+        for ($day = 1; $day <= 7; $day++) {
+            if ($this->getConfiguration('day_' . $day, 0) == 1) {
+                $days[] = $day;
+            }
+        }
+        return empty($days) ? array(1, 2, 3, 4, 5, 6, 7) : $days;
+    }
+
+    /*
+     * Les créneaux à venir, du jour et des suivants, limités aux jours retenus.
+     * Un créneau dont la fin est déjà passée n'intéresse plus personne : on
+     * bascule alors sur le prochain jour actif, ce qui est très exactement le
+     * « et le lendemain » attendu.
+     */
+    public function slots($_now = null, $_count = 2) {
+        $now = ($_now === null) ? time() : $_now;
+        $active = $this->activeDays();
+        $slots = array();
+
+        for ($offset = 0; $offset < 8 && count($slots) < $_count; $offset++) {
+            $day = strtotime('+' . $offset . ' day', $now);
+            if (!in_array((int) date('N', $day), $active)) {
+                continue;
+            }
+            $start = self::atTime($day, $this->getConfiguration('slot_start', self::DEFAULT_SLOT_START));
+            $end = self::atTime($day, $this->getConfiguration('slot_end', self::DEFAULT_SLOT_END));
+            if ($end <= $start) {
+                // Un créneau de nuit (22:00 → 01:00) finit le lendemain.
+                $end = strtotime('+1 day', $end);
+            }
+            if ($offset == 0 && $end < $now) {
+                continue;
+            }
+            $slots[] = array('start' => max($start, ($offset == 0) ? min($now, $end) : $start), 'end' => $end);
+        }
+        return $slots;
+    }
+
+    private static function atTime($_day, $_time) {
+        $parts = explode(':', trim($_time));
+        $hour = isset($parts[0]) ? (int) $parts[0] : 0;
+        $minute = isset($parts[1]) ? (int) $parts[1] : 0;
+        return mktime($hour, $minute, 0, (int) date('n', $_day), (int) date('j', $_day), (int) date('Y', $_day));
+    }
+
+    /* Ce qui, changé, oblige à tout relire. */
+    public function signature() {
+        return md5(implode('|', array(
+            $this->getConfiguration('from_id', ''),
+            $this->getConfiguration('to_id', ''),
+            $this->getConfiguration('slot_start', ''),
+            $this->getConfiguration('slot_end', ''),
+            implode(',', $this->activeDays()),
+            $this->maxTrains(),
+        )));
+    }
+
+    /* =================================================================== GARES */
+
+    /* La liste complète des gares desservies, telle qu'iRail la publie. */
+    public static function stations($_refresh = false) {
+        $key = __CLASS__ . '::stations::' . self::language();
+        if (!$_refresh) {
+            $cache = cache::byKey($key);
+            $value = $cache->getValue();
+            if (is_array($value) && !empty($value)) {
+                return $value;
+            }
+        }
+
+        $data = self::call('stations', array());
+        $stations = array();
+        foreach (isset($data['station']) ? $data['station'] : array() as $station) {
+            if (!isset($station['id'])) {
+                continue;
+            }
+            $stations[] = array(
+                'id'   => $station['id'],
+                'name' => isset($station['name']) ? $station['name'] : $station['id'],
+                'standardname' => isset($station['standardname']) ? $station['standardname'] : '',
+            );
+        }
+        if (!empty($stations)) {
+            cache::set($key, $stations, self::STATIONS_TTL);
+        }
+        return $stations;
+    }
+
+    /* Les gares dont le nom contient la recherche, au plus vingt. */
+    public static function searchStations($_query) {
+        $needle = self::normalize($_query);
+        if (strlen($needle) < 2) {
+            return array();
+        }
+
+        /*
+         * Trois paniers plutôt qu'un tri : le nom exact d'abord, puis les gares
+         * dont le nom commence par la recherche, enfin celles qui la contiennent
+         * ailleurs. Chaque panier garde l'ordre d'iRail, alphabétique, pour que
+         * deux frappes successives ne réordonnent pas la liste sous le curseur.
+         */
+        $exact = array();
+        $starts = array();
+        $contains = array();
+        foreach (self::stations() as $station) {
+            $name = self::normalize($station['name']);
+            $standard = self::normalize($station['standardname']);
+            if ($name === $needle || $standard === $needle) {
+                $exact[] = $station;
+            } elseif (strpos($name, $needle) === 0 || strpos($standard, $needle) === 0) {
+                $starts[] = $station;
+            } elseif (strpos($name, $needle) !== false || strpos($standard, $needle) !== false) {
+                $contains[] = $station;
+            }
+        }
+        return array_slice(array_merge($exact, $starts, $contains), 0, 20);
+    }
+
+    public static function stationById($_id) {
+        foreach (self::stations() as $station) {
+            if ($station['id'] === $_id) {
+                return $station;
+            }
+        }
+        return null;
+    }
+
+    /* Les perturbations du réseau, mutualisées entre tous les trajets. */
+    public static function disturbances() {
+        $key = __CLASS__ . '::disturbances::' . self::language();
+        $cache = cache::byKey($key);
+        $value = $cache->getValue();
+        if (is_array($value)) {
+            return $value;
+        }
+
+        try {
+            $data = self::call('disturbances', array());
+        } catch (Throwable $e) {
+            log::add(__CLASS__, 'debug', __('Perturbations indisponibles :', __FILE__) . ' ' . $e->getMessage());
+            // Mémoriser l'échec brièvement : sans cela, chaque trajet réessaierait
+            // à la suite et multiplierait les appels sur un service déjà en peine.
+            cache::set($key, array(), 60);
+            return array();
+        }
+
+        $disturbances = isset($data['disturbance']) ? $data['disturbance'] : array();
+        if (isset($disturbances['id'])) {
+            $disturbances = array($disturbances);
+        }
+
+        /*
+         * iRail mélange dans la même liste les incidents en cours (type
+         * « disturbance ») et les travaux programmés (type « planned »), ces
+         * derniers très largement majoritaires. Un navetteur veut savoir ce qui
+         * se passe ce matin, pas ce qui est prévu dans trois semaines.
+         */
+        $current = array();
+        foreach ($disturbances as $disturbance) {
+            if (isset($disturbance['type']) && $disturbance['type'] != 'disturbance') {
+                continue;
+            }
+            $current[] = $disturbance;
+        }
+
+        cache::set($key, $current, self::DISTURBANCES_TTL);
+        return $current;
+    }
+
+    /* ==================================================================== HTTP */
+
+    /* Un appel à iRail, avec sa réponse décodée. Lève en cas d'échec. */
+    public static function call($_path, $_params = array()) {
+        $params = array_merge(array('format' => 'json', 'lang' => self::language()), $_params);
+        $url = self::API_BASE . '/' . ltrim($_path, '/') . '?' . http_build_query($params);
+
+        $code = 0;
+        $body = self::httpGet($url, $code);
+
+        if ($body === false) {
+            throw new Exception(__('iRail ne répond pas.', __FILE__));
+        }
+        if ($code == 400 || $code == 404) {
+            /*
+             * 400 pour une gare inconnue, 404 pour un train ou un trajet
+             * introuvable : dans les deux cas la demande est mal formée ou sans
+             * réponse, ce n'est pas une panne du service. Le message d'iRail
+             * expose des noms de classes Java, inutiles à l'utilisateur.
+             */
+            throw new Exception(__('Aucun trajet trouvé : vérifiez les gares et le créneau.', __FILE__));
+        }
+        if ($code < 200 || $code >= 300) {
+            throw new Exception(__('iRail a refusé la demande :', __FILE__) . ' HTTP ' . $code);
+        }
+
+        $data = json_decode($body, true);
+        if (!is_array($data)) {
+            throw new Exception(__('Réponse illisible d\'iRail.', __FILE__));
+        }
+        return $data;
+    }
+
+    private static function httpGet($_url, &$_code = null) {
+        $timeout = max(3, (int) config::byKey('api_timeout', __CLASS__, 10));
+        $curl = curl_init();
+        curl_setopt_array($curl, array(
+            CURLOPT_URL            => $_url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT        => $timeout,
+            CURLOPT_ENCODING       => '',
+            /*
+             * iRail redirige encore ses anciennes adresses en 303 : suivre les
+             * redirections évite qu'un changement de racine ne casse le plugin
+             * du jour au lendemain.
+             */
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 3,
+            CURLOPT_HTTPHEADER     => array('Accept: application/json'),
+            /*
+             * iRail demande explicitement que chaque client s'identifie, avec
+             * un moyen de le contacter : c'est la contrepartie d'un service
+             * gratuit et sans clé.
+             */
+            CURLOPT_USERAGENT      => 'JeedomSNCB/' . self::pluginVersion() . ' (+https://github.com/replicatorbe/jeedom-plugin-sncbnmbs)',
+        ));
+        $body = curl_exec($curl);
+        $_code = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        $error = curl_error($curl);
+        curl_close($curl);
+
+        if ($body === false) {
+            log::add(__CLASS__, 'debug', __('Requête en échec :', __FILE__) . ' ' . $_url . ' (' . $error . ')');
+            return false;
+        }
+        return $body;
+    }
+
+    /* ================================================================== OUTILS */
+
+    public static function timezone() {
+        return new DateTimeZone(config::byKey('timezone', 'core', 'Europe/Brussels'));
+    }
+
+    /* La langue des libellés iRail : fr, nl, de ou en. */
+    public static function language() {
+        $lang = config::byKey('lang', __CLASS__, '');
+        if ($lang != '') {
+            return $lang;
+        }
+        $core = substr(config::byKey('language', 'core', 'fr_FR'), 0, 2);
+        return in_array($core, array('fr', 'nl', 'de', 'en')) ? $core : 'fr';
+    }
+
+    /*
+     * Le numéro de version sert à s'identifier auprès d'iRail. Il est appelé à
+     * chaque requête, donc à chaque minute : un fichier illisible ne doit ni
+     * lever, ni remplir les journaux d'avertissements PHP — file_get_contents
+     * émet un warning que catch(Throwable) ne rattrape pas.
+     */
+    public static function pluginVersion() {
+        $path = __DIR__ . '/../../plugin_info/info.json';
+        if (!is_readable($path)) {
+            return '1.0';
+        }
+        $info = json_decode((string) file_get_contents($path), true);
+        return (is_array($info) && isset($info['pluginVersion'])) ? $info['pluginVersion'] : '1.0';
+    }
+
+    /* Les retards d'iRail sont en secondes ; personne ne parle ainsi. */
+    public static function minutes($_seconds) {
+        return (int) round(((int) $_seconds) / 60);
+    }
+
+    public static function occupancyLabel($_occupancy) {
+        switch ($_occupancy) {
+            case 'low':    return __('Faible', __FILE__);
+            case 'medium': return __('Moyenne', __FILE__);
+            case 'high':   return __('Forte', __FILE__);
+        }
+        return '';
+    }
+
+    /* Minuscules, sans accents ni ponctuation : « Bruxelles-Midi » se cherche
+     * aussi bien en tapant « bruxelles midi ». */
+    public static function normalize($_text) {
+        $text = mb_strtolower(trim((string) $_text), 'UTF-8');
+        $text = strtr($text, array(
+            'à' => 'a', 'â' => 'a', 'ä' => 'a', 'á' => 'a', 'ã' => 'a', 'å' => 'a',
+            'ç' => 'c', 'é' => 'e', 'è' => 'e', 'ê' => 'e', 'ë' => 'e',
+            'î' => 'i', 'ï' => 'i', 'í' => 'i', 'ô' => 'o', 'ö' => 'o', 'ó' => 'o', 'õ' => 'o',
+            'ù' => 'u', 'û' => 'u', 'ü' => 'u', 'ú' => 'u', 'ÿ' => 'y', 'ñ' => 'n',
+        ));
+        $text = preg_replace('/[^a-z0-9]+/', ' ', $text);
+        return trim(preg_replace('/\s+/', ' ', $text));
+    }
+
+    /* =========================================== DONNÉES POUR L'INTERFACE */
+
+    /*
+     * Le tableau des trains tel que l'onglet « Trains » et le widget le lisent :
+     * déjà mis en forme, pour que ni le JS ni le gabarit n'aient à connaître le
+     * vocabulaire d'iRail.
+     */
+    public function board() {
+        $journeys = $this->getJourneys();
+        $now = time();
+        $next = $this->nextTrain(isset($journeys['trains']) ? $journeys['trains'] : array(), $now);
+        $rows = array();
+
+        foreach (isset($journeys['trains']) ? $journeys['trains'] : array() as $train) {
+            $delay = self::minutes($train['depDelay']);
+            $canceled = ($train['depCanceled'] || $train['arrCanceled']);
+            $rows[] = array(
+                'key'       => $train['key'],
+                'day'       => ($train['slot'] == 0) ? __('Aujourd\'hui', __FILE__) : __('Demain', __FILE__),
+                'time'      => date('H:i', $train['depTs']),
+                'real'      => date('H:i', $train['depTs'] + $train['depDelay']),
+                'delay'     => $delay,
+                'vehicle'   => $train['vehicle'],
+                'direction' => $train['direction'],
+                'platform'  => ($train['depPlatform'] == '?') ? '' : $train['depPlatform'],
+                'platformChanged' => !$train['depPlatformNormal'],
+                'arrival'   => ($train['arrTs'] > 0) ? date('H:i', $train['arrTs'] + $train['arrDelay']) : '',
+                'duration'  => self::minutes($train['duration']),
+                'transfers' => $train['transfers'],
+                'occupancy' => self::occupancyLabel($train['occupancy']),
+                'canceled'  => $canceled,
+                'left'      => $train['left'],
+                'isNext'    => ($next !== null && $next['key'] === $train['key']),
+                'alerts'    => $train['alerts'],
+                'status'    => $canceled ? 'canceled' : (($delay >= $this->threshold()) ? 'delayed' : (($delay > 0) ? 'slight' : 'ontime')),
+            );
+        }
+
+        return array(
+            'route'       => $this->routeLabel(),
+            'lastUpdate'  => isset($journeys['fetchedAt']) ? date('d/m/Y H:i', $journeys['fetchedAt']) : '',
+            'watching'    => $this->isWatching($now),
+            'threshold'   => $this->threshold(),
+            'trains'      => $rows,
+            'disturbances' => $this->matchingDisturbances(),
+        );
+    }
+}
+
+class sncbnmbsCmd extends cmd {
+
+    public function execute($_options = array()) {
+        $eqLogic = $this->getEqLogic();
+
+        switch ($this->getLogicalId()) {
+            case 'refresh':
+                $eqLogic->update(true);
+                /*
+                 * update() ne lève pas quand des horaires sont déjà en cache :
+                 * sans ce relais, un scénario appelant cette commande croirait
+                 * ses trains relus alors qu'iRail est en panne.
+                 */
+                if ($eqLogic->getRefreshError() != '') {
+                    throw new Exception($eqLogic->getRefreshError());
+                }
+                return true;
+
+            case 'acknowledge':
+                $eqLogic->acknowledge();
+                return true;
+        }
+        return true;
+    }
+}
