@@ -415,12 +415,20 @@ class sncbnmbs extends eqLogic {
     }
 
     /*
+     * Surtout pas nommée setCmd() : en enregistrant un équipement, le coeur
+     * passe le formulaire à utils::a2o(), qui transforme chaque clé envoyée en
+     * un appel « set » + clé (utils.class.php, vers la ligne 132). La page
+     * envoie une clé « cmd » pour le tableau des commandes : une méthode
+     * setCmd() est donc appelée par le coeur, et si elle est privée
+     * l'enregistrement meurt sur une erreur fatale — l'équipement reste vide et
+     * l'utilisateur ne voit qu'une page qui se rafraîchit sans rien garder.
+     *
      * checkAndUpdateCmd() n'écrit que si la valeur change, et c'est ce qui
      * déclenche les scénarios sur événement. On ne remplace jamais une valeur
      * connue par du vide sur un simple raté réseau : le dashboard se viderait
      * à la première coupure.
      */
-    private function setCmd($_logicalId, $_value) {
+    private function publishCmd($_logicalId, $_value) {
         if ($_value === '' || $_value === null) {
             $cmd = $this->getCmd(null, $_logicalId);
             if (is_object($cmd) && $cmd->execCmd() === '') {
@@ -765,55 +773,55 @@ class sncbnmbs extends eqLogic {
             $messages[] = $disturbance;
         }
 
-        $this->setCmd('trains_count', $count);
-        $this->setCmd('trains_delayed', $delayed);
-        $this->setCmd('trains_canceled', $canceled);
-        $this->setCmd('delay_max', $maxDelay);
-        $this->setCmd('alert_message', implode(' — ', array_slice(array_unique($messages), 0, 3)));
-        $this->setCmd('last_update', date('d/m/Y H:i', isset($_journeys['fetchedAt']) ? $_journeys['fetchedAt'] : $now));
+        $this->publishCmd('trains_count', $count);
+        $this->publishCmd('trains_delayed', $delayed);
+        $this->publishCmd('trains_canceled', $canceled);
+        $this->publishCmd('delay_max', $maxDelay);
+        $this->publishCmd('alert_message', implode(' — ', array_slice(array_unique($messages), 0, 3)));
+        $this->publishCmd('last_update', date('d/m/Y H:i', isset($_journeys['fetchedAt']) ? $_journeys['fetchedAt'] : $now));
 
         if ($next === null) {
-            $this->setCmd('summary', __('Aucun train dans le créneau', __FILE__));
-            $this->setCmd('next_time', '');
-            $this->setCmd('next_real', '');
-            $this->setCmd('next_delay', 0);
-            $this->setCmd('next_countdown', -1);
-            $this->setCmd('next_vehicle', '');
-            $this->setCmd('next_direction', '');
-            $this->setCmd('next_platform', '');
-            $this->setCmd('next_platform_changed', 0);
-            $this->setCmd('next_canceled', 0);
-            $this->setCmd('next_arrival', '');
-            $this->setCmd('next_duration', 0);
-            $this->setCmd('next_transfers', 0);
-            $this->setCmd('next_occupancy', '');
-            $this->setCmd('disturbed', ($canceled > 0 || $maxDelay >= $this->threshold()) ? 1 : 0);
+            $this->publishCmd('summary', __('Aucun train dans le créneau', __FILE__));
+            $this->publishCmd('next_time', '');
+            $this->publishCmd('next_real', '');
+            $this->publishCmd('next_delay', 0);
+            $this->publishCmd('next_countdown', -1);
+            $this->publishCmd('next_vehicle', '');
+            $this->publishCmd('next_direction', '');
+            $this->publishCmd('next_platform', '');
+            $this->publishCmd('next_platform_changed', 0);
+            $this->publishCmd('next_canceled', 0);
+            $this->publishCmd('next_arrival', '');
+            $this->publishCmd('next_duration', 0);
+            $this->publishCmd('next_transfers', 0);
+            $this->publishCmd('next_occupancy', '');
+            $this->publishCmd('disturbed', ($canceled > 0 || $maxDelay >= $this->threshold()) ? 1 : 0);
             return;
         }
 
         $delay = self::minutes($next['depDelay']);
         $realTs = $next['depTs'] + $next['depDelay'];
 
-        $this->setCmd('next_time', date('H:i', $next['depTs']));
-        $this->setCmd('next_real', date('H:i', $realTs));
-        $this->setCmd('next_delay', $delay);
+        $this->publishCmd('next_time', date('H:i', $next['depTs']));
+        $this->publishCmd('next_real', date('H:i', $realTs));
+        $this->publishCmd('next_delay', $delay);
         /*
          * Plancher à zéro : un train qui part à l'instant reste « le prochain »
          * pendant une minute, et un compte à rebours négatif se confondrait avec
          * le -1 qui signifie « aucun train ». Les scénarios testent sur >= 0.
          */
-        $this->setCmd('next_countdown', max(0, (int) floor(($realTs - $now) / 60)));
-        $this->setCmd('next_vehicle', $next['vehicle']);
-        $this->setCmd('next_direction', $next['direction']);
-        $this->setCmd('next_platform', ($next['depPlatform'] == '?') ? '' : $next['depPlatform']);
-        $this->setCmd('next_platform_changed', $next['depPlatformNormal'] ? 0 : 1);
-        $this->setCmd('next_canceled', ($next['depCanceled'] || $next['arrCanceled']) ? 1 : 0);
-        $this->setCmd('next_arrival', ($next['arrTs'] > 0) ? date('H:i', $next['arrTs'] + $next['arrDelay']) : '');
-        $this->setCmd('next_duration', self::minutes($next['duration']));
-        $this->setCmd('next_transfers', $next['transfers']);
-        $this->setCmd('next_occupancy', self::occupancyLabel($next['occupancy']));
-        $this->setCmd('summary', $this->summaryOf($next));
-        $this->setCmd('disturbed', $this->isDisturbed($next, $canceled, $maxDelay) ? 1 : 0);
+        $this->publishCmd('next_countdown', max(0, (int) floor(($realTs - $now) / 60)));
+        $this->publishCmd('next_vehicle', $next['vehicle']);
+        $this->publishCmd('next_direction', $next['direction']);
+        $this->publishCmd('next_platform', ($next['depPlatform'] == '?') ? '' : $next['depPlatform']);
+        $this->publishCmd('next_platform_changed', $next['depPlatformNormal'] ? 0 : 1);
+        $this->publishCmd('next_canceled', ($next['depCanceled'] || $next['arrCanceled']) ? 1 : 0);
+        $this->publishCmd('next_arrival', ($next['arrTs'] > 0) ? date('H:i', $next['arrTs'] + $next['arrDelay']) : '');
+        $this->publishCmd('next_duration', self::minutes($next['duration']));
+        $this->publishCmd('next_transfers', $next['transfers']);
+        $this->publishCmd('next_occupancy', self::occupancyLabel($next['occupancy']));
+        $this->publishCmd('summary', $this->summaryOf($next));
+        $this->publishCmd('disturbed', $this->isDisturbed($next, $canceled, $maxDelay) ? 1 : 0);
     }
 
     /*
