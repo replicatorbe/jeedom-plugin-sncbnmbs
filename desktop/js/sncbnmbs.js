@@ -44,14 +44,18 @@ function sncbnmbsAjax(_action, _data, _success, _options) {
     data: payload,
     dataType: 'json',
     noDisplayError: true,
-    error: function (request, status, error) {
+    /* Le coeur n'appelle ce rappel qu'avec un seul argument (domUtils.ajax le
+       range dans onError puis l'invoque tel quel) : réclamer request/status/error
+       affichait « [object Object] : undefined ». */
+    error: function (_error) {
       release()
+      var message = '{{Jeedom n\'a pas répondu.}}'
       if (isset(options.failure)) {
-        options.failure('{{Jeedom n\'a pas répondu.}}')
+        options.failure(message)
         return
       }
       if (options.silent === true) { return }
-      domUtils.handleAjaxError(request, status, error)
+      jeedomUtils.showAlert({ message: message, level: 'danger' })
     },
     success: function (data) {
       release()
@@ -102,7 +106,7 @@ function sncbnmbsCheckSaved() {
   var modified = (typeof jeeFrontEnd !== 'undefined' && jeeFrontEnd.modifyWithoutSave === true)
     || window.modifyWithoutSave === true
   if (modified) {
-    jeedomUtils.showAlert({ message: '{{Enregistrez vos modifications avant de continuer}}', level: 'warning' })
+    jeedomUtils.showAlert({ message: '{{Cliquez d\'abord sur Sauvegarder, en haut à droite.}}', level: 'warning' })
     return false
   }
   return true
@@ -258,11 +262,18 @@ function sncbnmbsShowAlertCmd() {
      qu'aucune commande n'est configurée alors qu'un identifiant mort traîne
      et sera exécuté à la prochaine alerte. */
   display.value = '#' + id + '#'
+  display.classList.remove('alert-danger')
   if (typeof jeedom === 'undefined' || !isset(jeedom.cmd) || !isset(jeedom.cmd.getHumanCmdName)) { return }
 
   jeedom.cmd.getHumanCmdName({
     id: id,
-    error: function () { },
+    /* Une commande supprimée depuis laisse un identifiant mort qui ne
+       déclenchera plus rien : le signaler vaut mieux qu'un champ énigmatique. */
+    error: function () {
+      if (sncbnmbsConfig('alert_cmd') !== String(id)) { return }
+      display.value = '{{Commande introuvable — choisissez-en une autre}}'
+      display.classList.add('alert-danger')
+    },
     success: function (result) {
       /* La réponse peut arriver après un changement de trajet : ne l'écrire
          que si l'identifiant affiché est toujours celui demandé. */
@@ -274,7 +285,33 @@ function sncbnmbsShowAlertCmd() {
 
 /* ============================================================ ÉQUIPEMENT */
 
+/*
+ * Le coeur réinitialise les .eqLogicAttr en leur posant une valeur vide, ce qui
+ * ne touche pas une case à cocher ; et setJeeValues n'écrit que les clés
+ * présentes. Résultat : les jours et « surveillance à la minute » du trajet
+ * précédent restaient cochés sur le suivant — et un trajet neuf s'enregistrait
+ * avec des jours que l'utilisateur n'avait jamais choisis.
+ */
+function sncbnmbsSyncCheckboxes(_eqLogic) {
+  var config = (isset(_eqLogic) && isset(_eqLogic.configuration)) ? _eqLogic.configuration : {}
+  var isNew = !(isset(_eqLogic) && isset(_eqLogic.id) && _eqLogic.id != '')
+
+  for (var day = 1; day <= 7; day++) {
+    var box = document.querySelector('.eqLogicAttr[data-l1key="configuration"][data-l2key="day_' + day + '"]')
+    if (box === null) { continue }
+    /* Sur un trajet neuf, montrer ce que l'enregistrement posera : du lundi au
+       vendredi, exactement ce que fait preSave(). */
+    box.checked = isNew ? (day <= 5) : (init(config['day_' + day], 0) == 1)
+  }
+
+  var watch = document.querySelector('.eqLogicAttr[data-l1key="configuration"][data-l2key="watch_enabled"]')
+  if (watch !== null) {
+    watch.checked = isNew ? true : (init(config.watch_enabled, 0) == 1)
+  }
+}
+
 function printEqLogic(_eqLogic) {
+  sncbnmbsSyncCheckboxes(_eqLogic)
   /* Le coeur ne réinitialise que les .eqLogicAttr : tout le reste de l'écran
      garderait sinon l'état du trajet précédemment ouvert. */
   sncbnmbsShowResult('', 'info')
@@ -365,21 +402,37 @@ function sncbnmbsRenderBoard(_board) {
       : '{{en veille, relecture au quart d\'heure}}'
   }
 
-  var route = sncbnmbsEl('span_sncbnmbsRoute')
-  if (route !== null && isset(_board.route) && _board.route !== '') {
-    route.textContent = _board.route
-  }
+  /*
+     Le récapitulatif reflète les champs à l'écran, pas la base : l'écraser avec
+     board.route annulait la gare qu'on venait de choisir et qui n'est pas encore
+     enregistrée. sncbnmbsShowRoute() en reste seul maître.
+  */
+  sncbnmbsShowRoute()
 
   var alerts = sncbnmbsEl('div_sncbnmbsTrainAlerts')
   if (alerts !== null) {
     alerts.innerHTML = ''
+    var notices = []
     var disturbances = isset(_board.disturbances) ? _board.disturbances : []
-    for (var d = 0; d < disturbances.length; d++) {
+    for (var d = 0; d < disturbances.length; d++) { notices.push(disturbances[d]) }
+
+    /* Les avis attachés aux trains eux-mêmes : ils disent souvent pourquoi le
+       train est supprimé, et c'est l'information la plus utile de l'écran. */
+    var boardTrains = isset(_board.trains) ? _board.trains : []
+    for (var t = 0; t < boardTrains.length; t++) {
+      var own = isset(boardTrains[t].alerts) ? boardTrains[t].alerts : []
+      for (var a = 0; a < own.length; a++) {
+        var line = boardTrains[t].vehicle + ' : ' + own[a]
+        if (notices.indexOf(line) === -1) { notices.push(line) }
+      }
+    }
+
+    for (var k = 0; k < notices.length; k++) {
       var box = document.createElement('div')
       box.className = 'alert alert-warning'
       box.style.margin = '0 0 5px 0'
-      /* textContent et non innerHTML : le titre vient du flux de la SNCB. */
-      box.textContent = disturbances[d]
+      /* textContent et non innerHTML : le texte vient du flux de la SNCB. */
+      box.textContent = notices[k]
       alerts.appendChild(box)
     }
   }
@@ -420,15 +473,19 @@ function sncbnmbsTrainRow(_train) {
      qui suit — mais en retrait, pour qu'on ne le prenne pas pour une option. */
   if (_train.left === true) { row.style.opacity = '0.55' }
 
-  /* Les alertes d'iRail sont souvent longues : en infobulle plutôt qu'en
-     colonne, où elles écraseraient tout le reste du tableau. */
+  /* Surtout pas dans un attribut title : les infobulles du coeur sont rendues
+     en HTML (jeedomUtils.TOOLTIPSOPTIONS a allowHTML), et le texte vient du flux
+     de la SNCB. Les alertes sont affichées au-dessus du tableau, en textContent ;
+     ici, un simple repère. */
   if (isset(_train.alerts) && _train.alerts.length > 0) {
-    row.setAttribute('title', _train.alerts.join('\n'))
+    row.setAttribute('data-hasalert', '1')
   }
 
   var cell = function (_text) {
     var td = document.createElement('td')
-    td.textContent = _text
+    /* Un tiret plutôt qu'une cellule muette : une voie pas encore annoncée est
+       une information, une case vide ressemble à une panne. */
+    td.textContent = (!isset(_text) || _text === '' || _text === null) ? '—' : _text
     row.appendChild(td)
     return td
   }
@@ -488,7 +545,13 @@ function sncbnmbsTrainRow(_train) {
 /* =============================================================== RÉSEAU */
 
 /* Les perturbations de tout le réseau, indépendantes du trajet ouvert. */
+var sncbnmbsNetworkLoading = false
+
 function sncbnmbsLoadNetwork(_button) {
+  /* Deux clics rapides sur l'onglet lançaient deux appels : le conteneur reste
+     vide tant que la réponse n'est pas là, il ne peut pas servir de verrou. */
+  if (sncbnmbsNetworkLoading) { return }
+  sncbnmbsNetworkLoading = true
   var container = sncbnmbsEl('div_sncbnmbsNetwork')
   if (container === null) { return }
 
@@ -501,6 +564,7 @@ function sncbnmbsLoadNetwork(_button) {
   }
 
   sncbnmbsAjax('disturbances', {}, function (result) {
+    sncbnmbsNetworkLoading = false
     container.innerHTML = ''
     if (result.length === 0) {
       message('{{Aucune perturbation annoncée sur le réseau.}}', 'success')
@@ -511,7 +575,10 @@ function sncbnmbsLoadNetwork(_button) {
     }
   }, {
     button: _button,
-    failure: function (_message) { message(_message, 'danger') }
+    failure: function (_message) {
+      sncbnmbsNetworkLoading = false
+      message(_message, 'danger')
+    }
   })
 }
 
@@ -621,12 +688,23 @@ function sncbnmbsSearchStation(_which, _button) {
   }
 
   sncbnmbsAjax('searchStation', { q: query }, function (result) {
+    /*
+       Zéro résultat ne doit surtout pas valider la liste vide : cela effaçait la
+       gare déjà enregistrée, en silence, pour une simple faute de frappe.
+    */
+    if (result.length === 0) {
+      jeedomUtils.showAlert({
+        message: '{{Aucune gare ne correspond. Essayez sans accent ni tiret, par exemple « bruxelles midi ».}}',
+        level: 'warning', timeOut: 8000
+      })
+      return
+    }
     var select = sncbnmbsEl('sel_sncbnmbs' + sncbnmbsSuffix(_which))
     sncbnmbsFillSelect(select, result, (result.length === 1) ? result[0].id : sncbnmbsConfig(_which + '_id'),
       '{{Choisissez votre gare}}')
     sncbnmbsCommitStation(_which, select)
     if (result.length > 1) {
-      jeedomUtils.showAlert({ message: '{{Plusieurs gares correspondent, choisissez la vôtre.}}', level: 'info', timeOut: 6000 })
+      jeedomUtils.showAlert({ message: '{{Plusieurs gares correspondent, choisissez la vôtre dans la liste juste en dessous.}}', level: 'info', timeOut: 6000 })
     }
   }, { button: _button })
 }
@@ -763,12 +841,17 @@ sncbnmbsContainer.addEventListener('click', function (event) {
     if (refreshId === null) { return }
     sncbnmbsShowResult('', 'info')
     sncbnmbsAjax('refresh', { id: refreshId }, function (data) {
-      sncbnmbsShowResult(data.summary, 'success')
+      /* La garde vient d'abord : sinon le compte rendu du trajet qu'on vient de
+         quitter s'affiche sous les boutons de celui qu'on regarde. */
       if (!sncbnmbsIsDisplayed(refreshId)) { return }
+      sncbnmbsShowResult(data.summary, 'success')
       sncbnmbsRenderBoard(data.board)
     }, {
       button: target,
-      failure: function (message) { sncbnmbsShowResult(message, 'danger') }
+      failure: function (message) {
+        if (!sncbnmbsIsDisplayed(refreshId)) { return }
+        sncbnmbsShowResult(message, 'danger')
+      }
     })
     return
   }
@@ -779,10 +862,14 @@ sncbnmbsContainer.addEventListener('click', function (event) {
     if (ackId === null) { return }
     sncbnmbsShowResult('', 'info')
     sncbnmbsAjax('acknowledge', { id: ackId }, function (data) {
+      if (!sncbnmbsIsDisplayed(ackId)) { return }
       sncbnmbsShowResult(data.summary, 'success')
     }, {
       button: target,
-      failure: function (message) { sncbnmbsShowResult(message, 'danger') }
+      failure: function (message) {
+        if (!sncbnmbsIsDisplayed(ackId)) { return }
+        sncbnmbsShowResult(message, 'danger')
+      }
     })
     return
   }

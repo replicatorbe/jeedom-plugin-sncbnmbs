@@ -78,6 +78,9 @@ try {
     }
 
     if (init('action') == 'acknowledge') {
+        // Modifie l'état de la box : une démonstration publique ne doit pas
+        // pouvoir éteindre les alertes des autres.
+        unautorizedInDemo();
         $eqLogic = $getJourney(init('id'));
         $count = $eqLogic->acknowledge();
         ajax::success(array(

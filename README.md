@@ -5,8 +5,10 @@ Surveillance des trains belges pour navetteurs, à partir des données ouvertes
 
 Un équipement représente un trajet : une gare de départ, une gare d'arrivée, un
 créneau horaire et les jours de la semaine concernés. Le plugin liste les trains
-du jour et du lendemain, puis vérifie chaque minute leur état : retard,
-suppression, changement de quai, perturbation du réseau.
+du jour et du prochain jour actif, puis vérifie leur état : retard, suppression,
+changement de voie, perturbation du réseau. Chaque minute pendant le créneau
+surveillé et l'heure qui le précède, toutes les quinze minutes en dehors — iRail
+est gratuit, le plugin s'interdit d'en abuser.
 
 ## Ce que le plugin expose
 
@@ -19,7 +21,7 @@ suppression, changement de quai, perturbation du réseau.
 Toutes ces valeurs sont des commandes info : elles déclenchent vos scénarios par
 événement. Un trajet peut en plus appeler directement une commande d'action de
 votre choix (notification, message, lampe) dès qu'un retard dépasse le seuil
-configuré ou qu'un train est supprimé.
+configuré, qu'un train est supprimé ou que sa voie change.
 
 ## Installation
 

@@ -3,8 +3,8 @@
 This plugin watches Belgian trains for commuters, using the iRail open data. One
 device stands for one journey: a departure station, an arrival station, a time
 window and the days of the week concerned. The plugin lists the trains of the
-window, then checks their state — delay, cancellation, platform change, network
-disturbance — and exposes all of it as Jeedom commands.
+window, then checks their state during the watched window — delay, cancellation,
+platform change, network disturbance — and exposes all of it as Jeedom commands.
 
 It is not a journey planner. It does not look for the best route, books nothing,
 buys no ticket and offers no alternative when your train is cancelled. It
@@ -56,7 +56,7 @@ typed: the plugin works with iRail identifiers, not with names.
 | Delay threshold | from how many minutes a train counts as "delayed". 5 by default |
 | Minute-by-minute watching | unticked, the journey is only read again every quarter of an hour |
 | Minutes ahead | how many minutes before the window the minute-by-minute watch starts. 60 by default, 240 at most |
-| Number of trains | how many departures to follow per window, from 1 to 12. 6 by default |
+| Number of trains | how many departures to follow per window, from 1 to 6. 6 by default |
 | Command to trigger | the Jeedom action command called as soon as a problem shows up. The cross clears it |
 
 Two buttons complete that block: **Refresh now**, which queries iRail without
@@ -75,7 +75,7 @@ The three other tabs hold no setting:
 
 - **Trains** lists the selected trains — day, departure, delay, train, direction,
   platform, arrival, duration, transfers, occupancy — along with the time of the
-  last read and the state of the watch. It reads what the plugin has already
+  last check and the state of the watch. It reads what the plugin has already
   fetched: opening it queries nothing and costs nothing.
 - **Network** shows the disturbances published for the whole network, your
   journey or not, with a Refresh button. Those naming one of your two stations
@@ -89,8 +89,10 @@ time, and never stops on its own. Without an upper bound, a window from 7 to
 9 am would also bring back the 11 am train, and wake you up for a delay that
 does not concern you.
 
-Active days are ticked from Monday to Sunday. **No day ticked means every day**:
-that is the setting for a journey with no fixed schedule.
+Active days are ticked from Monday to Sunday. A new journey is created with
+**Monday to Friday ticked**: that is the commuting journey, and it keeps a fresh
+journey from querying the network on a Sunday. Untick them all and the rule
+flips: **no day ticked means every day**, for a journey with no fixed schedule.
 
 The plugin follows two windows at a time: today's and the one of the next active
 day. Once today's window is over, the display switches to the next one by
@@ -102,7 +104,9 @@ the minute, and every read costs a call.
 > journey ticked Monday to Friday shows Monday from Friday evening on.
 
 A window whose end time comes before its start time is understood as a night
-window: `22:00` → `01:00` ends the following morning.
+window: `22:00` → `01:00` ends the following morning, and is still followed after
+midnight — which is exactly when you look at it. A window whose start and end are
+identical lasts one hour, not twenty-four: you meant a moment, not a whole day.
 
 ## Minute-by-minute watching
 
@@ -124,7 +128,8 @@ service, without an API key and without an invoice: watching a 7 am journey
 around the clock would make 1440 requests a day in order to use 120 of them. The
 plugin therefore sets its own bounds:
 
-- the number of trains followed is capped at 12;
+- the number of trains followed is capped at 6. That is not only restraint:
+  iRail silently ignores any higher request and returns six connections anyway;
 - the upstream watch delay is capped at 240 minutes;
 - the "Refresh" command reads nothing again if the last read is less than
   20 seconds old, even when called in a loop by a scenario;
@@ -156,13 +161,16 @@ It is called with two parameters, the ones Jeedom message commands expect:
 | `title` | `Train — <device name>` |
 | `message` | the route, then the problems found, at most three |
 
-Count as problems:
+Three situations, and only three, count as a problem:
 
-- a departure delay equal to or above the threshold;
 - a cancellation, at departure or at arrival;
-- a platform change, when iRail reports the platform is not the usual one;
-- the iRail alerts attached to the journey, and the network disturbances matched
-  against both stations.
+- a departure delay equal to or above the threshold;
+- a platform change, when iRail reports the platform is not the usual one.
+
+The iRail alerts attached to trains and the network disturbances **never call
+that command**. They feed the "Disturbance message" command and may light up
+"Journey disrupted", nothing more: they are free text, often works or commercial
+notices, worth reading but not worth waking anyone up for.
 
 A train that has already left is no longer reported: keeping on alerting about it
 would only delay the alert about the next one.
@@ -188,7 +196,8 @@ warning me about anything":
 
 ## Available commands
 
-Twenty-three commands, three of them visible by default.
+Twenty-three commands, four of them visible by default — three tiles and a
+button.
 
 | Command | Type | Description |
 |---|---|---|
@@ -197,13 +206,13 @@ Twenty-three commands, three of them visible by default.
 | Journey disrupted (`disturbed`) | info / binary | `1` as soon as a train is cancelled, an alert is attached to the next train, its platform changes, or a delay reaches the threshold |
 | Scheduled departure (`next_time`) | info / string | the timetable time, `HH:MM` |
 | Actual departure (`next_real`) | info / string | the timetable time plus the delay |
-| Departure in (`next_countdown`) | info / numeric, min | minutes before the actual departure. `-1` when there is no train |
+| Departure in (`next_countdown`) | info / numeric, min | minutes before the actual departure, never negative. `-1` only when there is no train at all |
 | Train (`next_vehicle`) | info / string | `IC 2137`, `S13424`... |
 | Direction (`next_direction`) | info / string | the train's displayed destination, not your arrival station |
 | Platform (`next_platform`) | info / string | empty while iRail has not published it |
 | Platform change (`next_platform_changed`) | info / binary | `1` when the platform is not the usual one |
 | Next train cancelled (`next_canceled`) | info / binary | cancellation at departure or at arrival |
-| Scheduled arrival (`next_arrival`) | info / string | the arrival time, delay included |
+| Actual arrival (`next_arrival`) | info / string | the arrival time, arrival delay included |
 | Journey duration (`next_duration`) | info / numeric, min | |
 | Transfers (`next_transfers`) | info / numeric | `0` for a direct train |
 | Occupancy (`next_occupancy`) | info / string | `Low`, `Medium`, `High`, or empty |
@@ -223,16 +232,22 @@ A few details that keep scenarios honest:
 - the next train is the first one that has not left yet, with one minute of
   leeway after its actual time: a train you have just missed is no longer the
   next one;
-- "Departure in" is `-1` when no train is known. Test on `>= 0` before comparing
-  it to a duration;
+- "Departure in" never drops below `0` as long as a train is known, and is `-1`
+  when there is none. Test on `>= 0` before comparing it to a duration;
+- "Trains in the window", "Delayed trains", "Cancelled trains" and "Maximum
+  delay" cover **both known windows**: today's and the one of the next active
+  day. A train announced at +30 for tomorrow morning therefore inflates those
+  counters tonight, and lights up "Journey disrupted" while nothing is running
+  any more. To speak only of the train that concerns you, use the next train
+  commands;
 - "Occupancy" is very often empty. iRail publishes it from the feedback of
   travellers using the SNCB app: most trains get none. A scenario must not depend
   on that value.
 
 ## On the dashboard
 
-Three commands are visible by default: **Next train**, **Next train delay** and
-**Journey disrupted**, plus the **Refresh** button. The others exist for
+Four commands are visible by default: the **Next train**, **Next train delay**
+and **Journey disrupted** tiles, and the **Refresh** button. The others exist for
 scenarios and graphs, and would otherwise pile up as a column of twenty tiles for
 a single journey. To display another one, make it visible from the Commands tab.
 
@@ -266,6 +281,11 @@ telling a `0` from a `1`.
 
 ## Using it in a scenario
 
+The examples below are pseudo-code: they show the trigger, the condition and the
+idea of the action, to be written out in the scenario block of your choice.
+`message::notification` stands for the action command of your own notification
+tool — the very one you would pick as the command to trigger.
+
 Being warned of a serious delay, on event:
 
 ```
@@ -276,14 +296,19 @@ Then: message::notification with
       + #[Home][Morning train][Next train delay]# + " min"
 ```
 
-Leaving earlier when the train is cancelled:
+Knowing at once that a train will not run:
 
 ```
 Trigger: #[Home][Morning train][Next train cancelled]#
 If: #[Home][Morning train][Next train cancelled]# == 1
 Then: message::notification with
-      "Train cancelled — next departure: " + #[Home][Morning train][Scheduled departure]#
+      "Cancelled: " + #[Home][Morning train][Train]#
+      + " at " + #[Home][Morning train][Scheduled departure]#
 ```
+
+> "Scheduled departure" is the time of the next train, cancelled ones included: a
+> cancelled train stays the next one until its time has passed. These commands
+> describe that train, not the one after it.
 
 Announcing the platform when it is time to leave, at 7:10 am:
 
@@ -342,11 +367,15 @@ everyone.
 
 > Network disturbances are matched against the **names** of the two stations of
 > the journey, looked up in the title and the description of the disturbance.
-> iRail does not publish the list of stations concerned by a disturbance: this is
-> all the source allows. A "Mechelen - Dendermonde" disturbance will therefore
-> show up on every journey mentioning either of those two stations, even with no
-> relation to the closed section. The plugin prefers that false positive — which
-> informs — to the false negative, which leaves you on the platform.
+> iRail does not publish the list of stations concerned: this is all the source
+> allows. The name has to be found whole, between two word boundaries — so "Mol"
+> no longer sticks to "Molenbeek" — and names shorter than four letters are
+> ignored, failing which "Ans" would recognise itself inside the French word
+> "dans". It remains that a "Mechelen - Dendermonde" disturbance shows up on
+> every journey naming either of those two stations, even with no relation to the
+> closed section, and that a station with too short a name brings back no
+> disturbance at all. The plugin prefers that false positive — which informs — to
+> the false negative, which leaves you on the platform.
 
 Only ongoing incidents are kept. iRail mixes incidents and planned works in the
 same list, the latter by far the more numerous: a commuter wants to know what is

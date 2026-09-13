@@ -280,10 +280,10 @@ $eqLogics = eqLogic::byType($plugin->getId());
 							<div class="form-group">
 								<label class="col-sm-4 control-label">{{Nombre de trains}}</label>
 								<div class="col-sm-3">
-									<input type="number" min="1" max="12" step="1" class="eqLogicAttr form-control" data-l1key="configuration" data-l2key="max_trains" placeholder="6">
+									<input type="number" min="1" max="6" step="1" class="eqLogicAttr form-control" data-l1key="configuration" data-l2key="max_trains" placeholder="6">
 								</div>
 								<div class="col-sm-5">
-									<span class="help-block" style="margin:0;">{{Nombre de départs demandés par créneau, 12 au maximum. Au-delà de ce que dure votre créneau, les trains supplémentaires ne vous concernent plus.}}</span>
+									<span class="help-block" style="margin:0;">{{Nombre de départs demandés par créneau, 6 au maximum : au-delà, iRail ignore la demande sans le dire et en rend six quand même. Au-delà de ce que dure votre créneau, les trains supplémentaires ne vous concernent plus de toute façon.}}</span>
 								</div>
 							</div>
 							<div class="form-group">
@@ -330,7 +330,7 @@ $eqLogics = eqLogic::byType($plugin->getId());
 					<div class="alert alert-info" style="margin-bottom:10px;">
 						{{Les trains du jour et du lendemain retenus pour ce trajet, tels que le réseau les annonce. Cet onglet lit ce que le plugin a déjà récupéré : l'ouvrir n'interroge pas le réseau.}}
 						<br>
-						<b>{{Dernière lecture}} :</b> <span id="span_sncbnmbsLastUpdate">-</span>
+						<b>{{Dernière vérification}} :</b> <span id="span_sncbnmbsLastUpdate">-</span>
 						&nbsp;&nbsp;
 						<b>{{Surveillance}} :</b> <span id="span_sncbnmbsWatching">-</span>
 					</div>

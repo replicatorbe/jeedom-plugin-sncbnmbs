@@ -110,13 +110,26 @@
 
         var delay = cmd.querySelector('.sncbnmbsDelay')
         delay.className = 'sncbnmbsDelay'
-        if (train.plain !== '') { delay.textContent = '' }
-        else if (train.canceled !== '') { delay.textContent = train.canceled; delay.className += ' label label-danger' }
-        else if (train.delay !== '') { delay.textContent = train.delay; delay.className += ' label label-warning' }
-        /* Chaîne à traduire sans apostrophe : elle traverse un littéral
-           JavaScript, et la contre-oblique d'échappement se retrouverait dans la
-           clé de traduction. */
-        else { delay.textContent = '{{sans retard}}'; delay.className += ' label label-success' }
+        if (train.plain !== '' || train.time === '') {
+          /* Ni train, ni valeur encore reçue : surtout pas de pastille verte.
+             Un trajet qui vient d'être créé affirmerait que tout va bien alors
+             qu'il ne sait rien. */
+          delay.textContent = ''
+        } else if (train.canceled !== '') {
+          delay.textContent = train.canceled
+          delay.className += ' label label-danger'
+        } else if (train.delay !== '') {
+          delay.textContent = train.delay
+          delay.className += ' label label-warning'
+        } else {
+          /* Une coche, et non un mot : le coeur traduit les gabarits de widget
+             depuis son propre fichier de langue (cmd::toHtml passe un chemin en
+             core/template/…), qu'un plugin ne peut pas alimenter. Un texte
+             français serait resté français en anglais. */
+          delay.textContent = '✓'
+          delay.setAttribute('title', 'OK')
+          delay.className += ' label label-success'
+        }
         delay.style.display = (delay.textContent === '') ? 'none' : ''
 
         var platform = cmd.querySelector('.sncbnmbsPlatform')
