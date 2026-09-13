@@ -54,6 +54,22 @@ class sncbnmbs extends eqLogic {
     /* Garde-fou contre un scénario qui appellerait « Rafraîchir » en boucle. */
     const FORCE_MIN_INTERVAL = 20;
 
+    /*
+     * Budget de temps d'un passage du cron. plugin::cron() dispose de deux
+     * minutes pour TOUS les plugins de la box : un utilisateur à sept trajets
+     * les consommerait à lui seul si chacun attendait son délai d'expiration.
+     * Au-delà du budget, les trajets restants sont simplement recomposés depuis
+     * le cache et leur appel réseau attend la minute suivante.
+     */
+    const CRON_BUDGET = 45;
+
+    /*
+     * En plein créneau, on demande les trains à partir d'une demi-heure en
+     * arrière : un train prévu avant l'heure courante mais retardé part encore
+     * dans le futur, et c'est précisément celui-là qu'il faut proposer.
+     */
+    const LOOKBACK = 1800;
+
     /* Valeurs par défaut d'un trajet neuf. */
     const DEFAULT_SLOT_START = '07:00';
     const DEFAULT_SLOT_END   = '09:00';
@@ -61,8 +77,13 @@ class sncbnmbs extends eqLogic {
     const DEFAULT_THRESHOLD  = 5;
     const DEFAULT_WATCH_BEFORE = 60;
 
-    /* Bornes de sécurité : iRail est un service gratuit et communautaire. */
-    const MAX_TRAINS = 12;
+    /*
+     * Bornes de sécurité : iRail est un service gratuit et communautaire.
+     * Six trains, et pas douze : au-delà, iRail ignore le paramètre `results`
+     * sans le dire et rend six connexions quand même — vérifié en demandant 12
+     * sur Namur → Bruxelles-Central, réponse identique à celle de 6.
+     */
+    const MAX_TRAINS = 6;
     const MAX_WATCH_BEFORE = 240;
 
     /* Types de problème, par ordre de gravité croissante. */
@@ -106,9 +127,11 @@ class sncbnmbs extends eqLogic {
      * de 7 h du matin ferait 1440 requêtes par jour pour en utiliser 120.
      */
     public static function cron() {
+        $deadline = microtime(true) + self::CRON_BUDGET;
+
         foreach (self::byType(__CLASS__, true) as $eqLogic) {
             try {
-                if (!$eqLogic->shouldPoll()) {
+                if (!$eqLogic->shouldPoll() || microtime(true) > $deadline) {
                     /*
                      * Même sans nouvel appel, les commandes sont recomposées :
                      * le compte à rebours et « prochain train » changent à
@@ -179,6 +202,19 @@ class sncbnmbs extends eqLogic {
             if ($this->getConfiguration($key, '') === '') {
                 $this->setConfiguration($key, $default);
             }
+        }
+
+        /*
+         * Du lundi au vendredi à la création. « Aucune case cochée vaut tous les
+         * jours » reste vrai si l'utilisateur les décoche toutes, mais un trajet
+         * neuf ne doit pas interroger le réseau le dimanche pour un trajet de
+         * bureau : c'est ce que conseille l'aide du formulaire, autant le faire.
+         */
+        if ($this->getConfiguration('days_initialized', '') === '') {
+            for ($day = 1; $day <= 5; $day++) {
+                $this->setConfiguration('day_' . $day, 1);
+            }
+            $this->setConfiguration('days_initialized', 1);
         }
     }
 
@@ -339,7 +375,9 @@ class sncbnmbs extends eqLogic {
         $this->addCmdIfMissing('next_canceled', 'Prochain train supprimé', 'info', 'binary', array(
             'order' => $order++, 'template' => 'sncbnmbs::troubleLine',
         ));
-        $this->addCmdIfMissing('next_arrival', 'Arrivée prévue', 'info', 'string', array('order' => $order++));
+        /* Heure réelle, retard compris : « prévue » aurait laissé croire à
+         * l'horaire théorique et tout calcul d'écart aurait rendu zéro. */
+        $this->addCmdIfMissing('next_arrival', 'Arrivée réelle', 'info', 'string', array('order' => $order++));
         $this->addCmdIfMissing('next_duration', 'Durée du trajet', 'info', 'numeric', array(
             'order' => $order++, 'unite' => 'min',
         ));
@@ -402,8 +440,18 @@ class sncbnmbs extends eqLogic {
 
         $previous = $this->getJourneys();
         $now = time();
-        if ($_force && ($now - (isset($previous['fetchedAt']) ? $previous['fetchedAt'] : 0)) < self::FORCE_MIN_INTERVAL) {
-            $_force = false;
+        /*
+         * Un scénario qui appelle « Rafraîchir » en boucle ne doit pas devenir
+         * un client abusif d'un service gratuit : sous FORCE_MIN_INTERVAL, on
+         * recompose depuis le cache sans toucher au réseau. Se contenter de
+         * retomber sur un rafraîchissement normal ne suffisait pas — le créneau
+         * en cours est justement celui qu'on relit à chaque passage.
+         */
+        if ($_force && !empty($previous)
+            && ($now - (isset($previous['fetchedAt']) ? $previous['fetchedAt'] : 0)) < self::FORCE_MIN_INTERVAL) {
+            $this->refreshCommands($previous);
+            $this->checkAlerts($previous);
+            return $previous;
         }
 
         try {
@@ -445,64 +493,89 @@ class sncbnmbs extends eqLogic {
      */
     private function fetchJourneys($_previous, $_force = false) {
         $now = time();
+        $previousTrains = isset($_previous['trains']) ? $_previous['trains'] : array();
+        $previousAt = isset($_previous['fetchedDates']) ? $_previous['fetchedDates'] : array();
         $trains = array();
+        $fetchedDates = array();
         $failures = array();
+        $nearest = true;
 
-        foreach ($this->slots($now, 2) as $index => $slot) {
-            $stale = true;
-            if ($index > 0 && !$_force) {
-                $age = $now - (isset($_previous['tomorrowAt']) ? $_previous['tomorrowAt'] : 0);
-                $stale = ($age >= self::TOMORROW_TTL);
-            }
+        foreach ($this->slots($now, 2) as $slot) {
+            $date = $slot['date'];
+            /*
+             * Un créneau est « vivant » quand on est dedans ou dans son avance :
+             * c'est celui dont les retards changent à la minute. Les autres,
+             * fussent-ils rendus en premier parce que le créneau du jour est
+             * terminé, ne bougent pas et se contentent d'une relecture par
+             * demi-heure. Raisonner sur le rang, et non sur l'heure, faisait
+             * relire un lundi matin lointain à chaque passage.
+             */
+            $live = ($now >= $slot['start'] - ($this->watchBefore() * 60) && $now <= $slot['end']);
+            $age = $now - (isset($previousAt[$date]) ? $previousAt[$date] : 0);
+            $stale = ($_force || $live || $age >= self::TOMORROW_TTL);
 
             if (!$stale) {
-                // Réutiliser tels quels les trains déjà connus pour ce jour.
-                foreach (isset($_previous['trains']) ? $_previous['trains'] : array() as $train) {
-                    if ($train['slot'] == $index) {
+                // Réutiliser tels quels les trains déjà connus pour cette date.
+                foreach ($previousTrains as $train) {
+                    if (isset($train['date']) && $train['date'] === $date) {
                         $trains[] = $train;
                     }
                 }
+                $fetchedDates[$date] = isset($previousAt[$date]) ? $previousAt[$date] : 0;
+                $nearest = false;
                 continue;
             }
 
             try {
-                $found = $this->fetchSlot($slot, $index);
-                $trains = array_merge($trains, $found);
-                if ($index > 0) {
-                    $tomorrowAt = $now;
-                }
+                $trains = array_merge($trains, $this->fetchSlot($slot, $now));
+                $fetchedDates[$date] = $now;
             } catch (Throwable $e) {
                 /*
-                 * Le jour même prime : si c'est lui qui échoue, il n'y a rien à
-                 * afficher et l'erreur doit remonter. Un échec sur le lendemain
-                 * laisse le trajet parfaitement utilisable.
+                 * Le créneau le plus proche prime : si c'est lui qui échoue, il
+                 * n'y a rien à afficher et l'erreur doit remonter. Un échec sur
+                 * le suivant laisse le trajet parfaitement utilisable.
                  */
-                if ($index == 0) {
+                if ($nearest) {
                     throw $e;
                 }
                 $failures[] = $e->getMessage();
                 log::add(__CLASS__, 'debug', $this->getHumanName() . ' : ' . $e->getMessage());
             }
+            $nearest = false;
         }
 
         usort($trains, array(__CLASS__, 'compareTrains'));
 
         return array(
-            'fetchedAt'  => $now,
-            'tomorrowAt' => isset($tomorrowAt) ? $tomorrowAt : (isset($_previous['tomorrowAt']) ? $_previous['tomorrowAt'] : 0),
-            'signature'  => $this->signature(),
-            'trains'     => $trains,
-            'warnings'   => $failures,
+            'fetchedAt'    => $now,
+            'fetchedDates' => $fetchedDates,
+            'signature'    => $this->signature(),
+            'trains'       => $trains,
+            'warnings'     => $failures,
         );
     }
 
     /* Les trains d'un créneau, filtrés sur l'heure de départ prévue. */
-    private function fetchSlot($_slot, $_index) {
+    private function fetchSlot($_slot, $_now = null) {
+        $now = ($_now === null) ? time() : $_now;
+
+        /*
+         * En plein créneau, on ne repart pas de l'heure courante mais d'une
+         * demi-heure en arrière : un train prévu à 08:25 et retardé de quinze
+         * minutes part réellement à 08:40, il est encore prenable à 08:30, et
+         * demander « les trains à partir de 08:30 » le laissait justement de
+         * côté — le seul qu'on aurait pu avoir. Avant le créneau, la borne
+         * reste son vrai début.
+         */
+        $from = max($_slot['start'], min($now - self::LOOKBACK, $_slot['end']));
+
         $params = array(
             'from'    => $this->getConfiguration('from_id'),
             'to'      => $this->getConfiguration('to_id'),
-            'date'    => date('dmy', $_slot['start']),
-            'time'    => date('Hi', $_slot['start']),
+            // DDMMYY : tout autre format est accepté sans erreur par iRail, qui
+            // retombe alors silencieusement sur aujourd'hui.
+            'date'    => date('dmy', $from),
+            'time'    => date('Hi', $from),
             'timesel' => 'departure',
             'alerts'  => 'true',
             'results' => $this->maxTrains(),
@@ -511,12 +584,17 @@ class sncbnmbs extends eqLogic {
 
         $trains = array();
         $connections = isset($data['connection']) ? $data['connection'] : array();
-        if (isset($connections['id'])) {
+        if (is_array($connections) && isset($connections['id'])) {
             // iRail rend un objet nu quand il n'y a qu'un seul résultat.
             $connections = array($connections);
         }
+        if (!is_array($connections)) {
+            // Réponse de forme inattendue : un foreach sur une chaîne lèverait
+            // un avertissement à chaque minute dans les journaux.
+            $connections = array();
+        }
         foreach ($connections as $connection) {
-            $train = self::parseConnection($connection, $_index);
+            $train = self::parseConnection($connection, $_slot['date']);
             if ($train === null) {
                 continue;
             }
@@ -525,7 +603,7 @@ class sncbnmbs extends eqLogic {
              * haute : sans ce filtre, un créneau de 7 h à 9 h remonterait aussi
              * le train de 11 h et déclencherait des alertes hors sujet.
              */
-            if ($train['depTs'] > $_slot['end']) {
+            if ($train['depTs'] > $_slot['end'] || $train['depTs'] < $_slot['start']) {
                 continue;
             }
             $trains[] = $train;
@@ -537,11 +615,20 @@ class sncbnmbs extends eqLogic {
      * Tout arrive en chaînes chez iRail, y compris les nombres et les booléens.
      * Les délais sont en secondes, les heures en timestamps Unix.
      */
-    public static function parseConnection($_connection, $_slot = 0) {
+    public static function parseConnection($_connection, $_date = '') {
         if (!isset($_connection['departure']['time'])) {
             return null;
         }
         $departure = $_connection['departure'];
+        /*
+         * L'heure de départ fait foi : sans elle, rien n'est exploitable. Un
+         * champ présent mais illisible ("", "abc") donnait un train fantôme daté
+         * du 1er janvier 1970, compté dans « trains du créneau » et affiché à
+         * 01:00 au tableau.
+         */
+        if ((int) $departure['time'] <= 0) {
+            return null;
+        }
         $arrival = isset($_connection['arrival']) ? $_connection['arrival'] : array();
 
         /*
@@ -582,11 +669,11 @@ class sncbnmbs extends eqLogic {
              * d'aujourd'hui.
              */
             'key'        => $vehicle . '@' . $depTs,
-            'slot'       => $_slot,
+            'date'       => ($_date !== '') ? $_date : date('Ymd', $depTs),
             'vehicle'    => $vehicle,
             'vehicleId'  => isset($departure['vehicle']) ? $departure['vehicle'] : '',
             'depTs'      => $depTs,
-            'depDelay'   => isset($departure['delay']) ? (int) $departure['delay'] : 0,
+            'depDelay'   => self::sanitizeDelay(isset($departure['delay']) ? $departure['delay'] : 0),
             'depPlatform' => isset($departure['platform']) ? $departure['platform'] : '',
             'depPlatformNormal' => !isset($departure['platforminfo']['normal']) || $departure['platforminfo']['normal'] == '1',
             'depCanceled' => isset($departure['canceled']) && $departure['canceled'] == '1',
@@ -594,7 +681,7 @@ class sncbnmbs extends eqLogic {
             'direction'  => isset($departure['direction']['name']) ? $departure['direction']['name'] : '',
             'occupancy'  => isset($departure['occupancy']['name']) ? $departure['occupancy']['name'] : '',
             'arrTs'      => isset($arrival['time']) ? (int) $arrival['time'] : 0,
-            'arrDelay'   => isset($arrival['delay']) ? (int) $arrival['delay'] : 0,
+            'arrDelay'   => self::sanitizeDelay(isset($arrival['delay']) ? $arrival['delay'] : 0),
             'arrPlatform' => isset($arrival['platform']) ? $arrival['platform'] : '',
             'arrCanceled' => isset($arrival['canceled']) && $arrival['canceled'] == '1',
             'arrived'    => isset($arrival['arrived']) && $arrival['arrived'] == '1',
@@ -700,7 +787,12 @@ class sncbnmbs extends eqLogic {
         $this->setCmd('next_time', date('H:i', $next['depTs']));
         $this->setCmd('next_real', date('H:i', $realTs));
         $this->setCmd('next_delay', $delay);
-        $this->setCmd('next_countdown', (int) floor(($realTs - $now) / 60));
+        /*
+         * Plancher à zéro : un train qui part à l'instant reste « le prochain »
+         * pendant une minute, et un compte à rebours négatif se confondrait avec
+         * le -1 qui signifie « aucun train ». Les scénarios testent sur >= 0.
+         */
+        $this->setCmd('next_countdown', max(0, (int) floor(($realTs - $now) / 60)));
         $this->setCmd('next_vehicle', $next['vehicle']);
         $this->setCmd('next_direction', $next['direction']);
         $this->setCmd('next_platform', ($next['depPlatform'] == '?') ? '' : $next['depPlatform']);
@@ -789,7 +881,7 @@ class sncbnmbs extends eqLogic {
             if ($problem === null) {
                 continue;
             }
-            $fresh[$train['key']] = $problem['signature'];
+            $fresh[$train['key']] = array('flags' => $problem['flags'], 'band' => $problem['band']);
 
             /*
              * Un train acquitté le reste tant qu'il est au tableau. C'est bien
@@ -802,10 +894,26 @@ class sncbnmbs extends eqLogic {
                 $stillAcknowledged[$train['key']] = true;
                 continue;
             }
-            if (isset($notified[$train['key']]) && $notified[$train['key']] === $problem['signature']) {
+
+            $previous = isset($notified[$train['key']]) ? $notified[$train['key']] : null;
+            if ($previous === null) {
+                $events[] = $problem;
                 continue;
             }
-            $events[] = $problem;
+            /* Les états mémorisés par une version antérieure sont des chaînes. */
+            if (!is_array($previous)) {
+                $previous = array('flags' => (string) $previous, 'band' => 0);
+            }
+            /*
+             * On ne re-signale que ce qui s'aggrave : une tranche de retard plus
+             * haute, ou un ennui d'une autre nature (suppression, voie changée).
+             * Comparer les signatures à l'identique faisait re-notifier un train
+             * qui passait de +25 à +5 — une bonne nouvelle annoncée comme un
+             * incident.
+             */
+            if ($problem['band'] > $previous['band'] || $problem['flags'] !== $previous['flags']) {
+                $events[] = $problem;
+            }
         }
 
         $state['notified'] = $fresh;
@@ -821,39 +929,46 @@ class sncbnmbs extends eqLogic {
         $this->runAlertCmd($message);
     }
 
-    /* Le problème d'un train, ou null s'il n'y en a pas. */
+    /*
+     * TOUS les ennuis d'un train, et non le premier rencontré. Un train déjà
+     * retardé au-delà du seuil peut ensuite changer de voie : ne rendre que le
+     * retard laissait l'utilisateur sur le quai habituel, sans rien lui dire.
+     *
+     * Le retard est rendu séparément, en tranches de dix minutes : c'est lui
+     * seul qui peut s'aggraver progressivement, et il faut pouvoir comparer deux
+     * relevés pour distinguer une aggravation d'une amélioration.
+     */
     private function problemOf($_train, $_threshold) {
+        $flags = array();
+        $texts = array();
+        $band = 0;
+        $hour = date('H:i', $_train['depTs']);
+
         if ($_train['depCanceled'] || $_train['arrCanceled']) {
-            return array(
-                'type'      => self::PROBLEM_CANCELED,
-                'signature' => self::PROBLEM_CANCELED,
-                'train'     => $_train,
-                'text'      => sprintf(__('%s de %s supprimé', __FILE__), $_train['vehicle'], date('H:i', $_train['depTs'])),
-            );
+            $flags[] = self::PROBLEM_CANCELED;
+            $texts[] = sprintf(__('%s de %s supprimé', __FILE__), $_train['vehicle'], $hour);
+        } else {
+            $delay = self::minutes($_train['depDelay']);
+            if ($delay >= $_threshold) {
+                $band = 10 * (int) floor($delay / 10);
+                $texts[] = sprintf(__('%s de %s : +%s min', __FILE__), $_train['vehicle'], $hour, $delay);
+            }
+            /* Une voie changée sur un train supprimé n'apprend rien. */
+            if (!$_train['depPlatformNormal']) {
+                $flags[] = self::PROBLEM_PLATFORM . ':' . $_train['depPlatform'];
+                $texts[] = sprintf(__('%s de %s : voie %s au lieu de la voie habituelle', __FILE__), $_train['vehicle'], $hour, $_train['depPlatform']);
+            }
         }
-        $delay = self::minutes($_train['depDelay']);
-        if ($delay >= $_threshold) {
-            return array(
-                'type'      => self::PROBLEM_DELAY,
-                /*
-                 * La signature contient le retard : un train qui passe de 5 à
-                 * 25 minutes justifie une seconde alerte, l'utilisateur ayant
-                 * peut-être déjà décidé de partir sur la foi de la première.
-                 */
-                'signature' => self::PROBLEM_DELAY . ':' . (10 * (int) floor($delay / 10)),
-                'train'     => $_train,
-                'text'      => sprintf(__('%s de %s : +%s min', __FILE__), $_train['vehicle'], date('H:i', $_train['depTs']), $delay),
-            );
+
+        if (empty($texts)) {
+            return null;
         }
-        if (!$_train['depPlatformNormal']) {
-            return array(
-                'type'      => self::PROBLEM_PLATFORM,
-                'signature' => self::PROBLEM_PLATFORM . ':' . $_train['depPlatform'],
-                'train'     => $_train,
-                'text'      => sprintf(__('%s de %s : voie %s au lieu de la voie habituelle', __FILE__), $_train['vehicle'], date('H:i', $_train['depTs']), $_train['depPlatform']),
-            );
-        }
-        return null;
+        return array(
+            'flags' => implode('|', $flags),
+            'band'  => $band,
+            'train' => $_train,
+            'text'  => implode(' — ', $texts),
+        );
     }
 
     private function alertMessage($_events) {
@@ -924,11 +1039,16 @@ class sncbnmbs extends eqLogic {
      * Termonde : ... »). C'est approximatif, et c'est tout ce que la source
      * permet — un faux positif informe, un faux négatif laisse sur le quai.
      */
-    public function matchingDisturbances() {
+    public function matchingDisturbances($_allowFetch = true) {
         $names = array();
         foreach (array('from_label', 'to_label') as $key) {
             $label = self::normalize($this->getConfiguration($key, ''));
-            if ($label != '') {
+            /*
+             * Les noms de moins de quatre lettres sont écartés : « Ans » se
+             * retrouve dans « dans », et le trajet Ans → Namur remontait huit
+             * perturbations sans rapport, dont une sur Brussels Airport.
+             */
+            if (strlen($label) >= 4) {
                 $names[] = $label;
             }
         }
@@ -937,13 +1057,14 @@ class sncbnmbs extends eqLogic {
         }
 
         $matches = array();
-        foreach (self::disturbances() as $disturbance) {
+        foreach (self::disturbances($_allowFetch) as $disturbance) {
             $haystack = self::normalize(
                 (isset($disturbance['title']) ? $disturbance['title'] : '') . ' ' .
                 (isset($disturbance['description']) ? $disturbance['description'] : '')
             );
             foreach ($names as $name) {
-                if (strpos($haystack, $name) !== false) {
+                // Limite de mot : « Mol » ne doit pas s'accrocher à « Molenbeek ».
+                if (preg_match('/\b' . preg_quote($name, '/') . '\b/', $haystack) === 1) {
                     $matches[] = isset($disturbance['title']) ? $disturbance['title'] : '';
                     break;
                 }
@@ -988,7 +1109,7 @@ class sncbnmbs extends eqLogic {
         $cache = cache::byKey($this->alertKey());
         $value = $cache->getValue();
         if (!is_array($value)) {
-            return array('notified' => array());
+            return array('notified' => array(), 'acknowledged' => array());
         }
         return $value;
     }
@@ -1058,39 +1179,68 @@ class sncbnmbs extends eqLogic {
     }
 
     /*
-     * Les créneaux à venir, du jour et des suivants, limités aux jours retenus.
-     * Un créneau dont la fin est déjà passée n'intéresse plus personne : on
-     * bascule alors sur le prochain jour actif, ce qui est très exactement le
-     * « et le lendemain » attendu.
+     * Les créneaux encore utiles, limités aux jours retenus : celui en cours
+     * s'il n'est pas fini, puis les suivants. Les bornes rendues sont les vraies
+     * bornes du créneau, jamais rabotées sur l'heure courante — c'est fetchSlot()
+     * qui décide à partir de quand interroger iRail, et isWatching() a besoin du
+     * vrai début pour placer sa fenêtre d'avance.
      */
     public function slots($_now = null, $_count = 2) {
         $now = ($_now === null) ? time() : $_now;
         $active = $this->activeDays();
         $slots = array();
 
-        for ($offset = 0; $offset < 8 && count($slots) < $_count; $offset++) {
-            $day = strtotime('+' . $offset . ' day', $now);
+        /*
+         * La veille est examinée elle aussi : un créneau de nuit (22:00 → 01:00)
+         * ouvert hier soir court encore à 00:30, et c'est très exactement
+         * l'heure à laquelle on le consulte. Ne partir que d'aujourd'hui le
+         * faisait disparaître au passage de minuit, en pleine surveillance.
+         */
+        for ($offset = -1; $offset < 8 && count($slots) < $_count; $offset++) {
+            $day = strtotime(sprintf('%+d day', $offset), $now);
             if (!in_array((int) date('N', $day), $active)) {
                 continue;
             }
             $start = self::atTime($day, $this->getConfiguration('slot_start', self::DEFAULT_SLOT_START));
             $end = self::atTime($day, $this->getConfiguration('slot_end', self::DEFAULT_SLOT_END));
-            if ($end <= $start) {
+            if ($end < $start) {
                 // Un créneau de nuit (22:00 → 01:00) finit le lendemain.
                 $end = strtotime('+1 day', $end);
+            } elseif ($end == $start) {
+                /*
+                 * Début et fin identiques : l'utilisateur a voulu un instant,
+                 * pas vingt-quatre heures. Reporter la fin au lendemain faisait
+                 * surveiller le trajet nuit comprise, à la minute.
+                 */
+                $end = $start + 3600;
             }
-            if ($offset == 0 && $end < $now) {
+            if ($end < $now) {
                 continue;
             }
-            $slots[] = array('start' => max($start, ($offset == 0) ? min($now, $end) : $start), 'end' => $end);
+            $slots[] = array(
+                'start' => $start,
+                'end'   => $end,
+                /*
+                 * La date du créneau, et non son rang : une fois le créneau du
+                 * jour passé, le premier créneau rendu est un jour futur. S'en
+                 * remettre au rang faisait étiqueter « Aujourd'hui » des trains
+                 * de lundi prochain.
+                 */
+                'date'  => date('Ymd', $start),
+            );
         }
         return $slots;
     }
 
+    /*
+     * Les bornes sont bridées à des heures réelles : « 25:99 » saisi à la main
+     * produisait un créneau dont la fin précédait le début, et le trajet
+     * répondait « aucun train » pour toujours, sans le moindre message.
+     */
     private static function atTime($_day, $_time) {
-        $parts = explode(':', trim($_time));
-        $hour = isset($parts[0]) ? (int) $parts[0] : 0;
-        $minute = isset($parts[1]) ? (int) $parts[1] : 0;
+        $parts = explode(':', trim((string) $_time));
+        $hour = isset($parts[0]) ? min(23, max(0, (int) $parts[0])) : 0;
+        $minute = isset($parts[1]) ? min(59, max(0, (int) $parts[1])) : 0;
         return mktime($hour, $minute, 0, (int) date('n', $_day), (int) date('j', $_day), (int) date('Y', $_day));
     }
 
@@ -1177,12 +1327,21 @@ class sncbnmbs extends eqLogic {
     }
 
     /* Les perturbations du réseau, mutualisées entre tous les trajets. */
-    public static function disturbances() {
+    public static function disturbances($_allowFetch = true) {
         $key = __CLASS__ . '::disturbances::' . self::language();
         $cache = cache::byKey($key);
         $value = $cache->getValue();
         if (is_array($value)) {
             return $value;
+        }
+        /*
+         * Consulter un écran ne doit jamais déclencher d'appel réseau : sans
+         * cette porte, ouvrir l'onglet « Trains » après trois minutes bloquait
+         * l'interface le temps d'un aller-retour vers iRail, contredisant ce que
+         * le bandeau de l'onglet promet.
+         */
+        if (!$_allowFetch) {
+            return array();
         }
 
         try {
@@ -1318,6 +1477,39 @@ class sncbnmbs extends eqLogic {
         return (is_array($info) && isset($info['pluginVersion'])) ? $info['pluginVersion'] : '1.0';
     }
 
+    /*
+     * « Aujourd'hui », « Demain », sinon la date. Une fois le créneau du jour
+     * terminé, le premier créneau suivi peut être lundi prochain : l'étiqueter
+     * « Aujourd'hui » parce qu'il arrive en tête de liste serait un mensonge.
+     */
+    public static function dayLabel($_date, $_now = null) {
+        $now = ($_now === null) ? time() : $_now;
+        if ($_date === '') {
+            return '';
+        }
+        if ($_date === date('Ymd', $now)) {
+            return __('Aujourd\'hui', __FILE__);
+        }
+        if ($_date === date('Ymd', strtotime('+1 day', $now))) {
+            return __('Demain', __FILE__);
+        }
+        $ts = strtotime($_date);
+        return ($ts === false) ? $_date : date('d/m', $ts);
+    }
+
+    /*
+     * Un retard est borné à vingt-quatre heures. Au-delà, ce n'est plus un
+     * retard mais une donnée corrompue : un champ à 10^21 débordait l'entier,
+     * et date() refusant un flottant, le rafraîchissement s'arrêtait sur une
+     * erreur fatale sans écrire la moindre commande.
+     */
+    public static function sanitizeDelay($_seconds) {
+        if (!is_scalar($_seconds) || !is_numeric($_seconds)) {
+            return 0;
+        }
+        return (int) min(86400, max(-3600, (float) $_seconds));
+    }
+
     /* Les retards d'iRail sont en secondes ; personne ne parle ainsi. */
     public static function minutes($_seconds) {
         return (int) round(((int) $_seconds) / 60);
@@ -1364,7 +1556,7 @@ class sncbnmbs extends eqLogic {
             $canceled = ($train['depCanceled'] || $train['arrCanceled']);
             $rows[] = array(
                 'key'       => $train['key'],
-                'day'       => ($train['slot'] == 0) ? __('Aujourd\'hui', __FILE__) : __('Demain', __FILE__),
+                'day'       => self::dayLabel(isset($train['date']) ? $train['date'] : '', $now),
                 'time'      => date('H:i', $train['depTs']),
                 'real'      => date('H:i', $train['depTs'] + $train['depDelay']),
                 'delay'     => $delay,
@@ -1390,7 +1582,7 @@ class sncbnmbs extends eqLogic {
             'watching'    => $this->isWatching($now),
             'threshold'   => $this->threshold(),
             'trains'      => $rows,
-            'disturbances' => $this->matchingDisturbances(),
+            'disturbances' => $this->matchingDisturbances(false),
         );
     }
 }

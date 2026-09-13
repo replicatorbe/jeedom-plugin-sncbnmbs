@@ -3,9 +3,9 @@
 Ce plugin surveille les trains belges pour les navetteurs, à partir des données
 ouvertes d'iRail. Un équipement représente un trajet : une gare de départ, une
 gare d'arrivée, un créneau horaire et les jours de la semaine concernés. Le
-plugin liste les trains du créneau, puis vérifie leur état — retard,
-suppression, changement de voie, perturbation du réseau — et expose le tout en
-commandes Jeedom.
+plugin liste les trains du créneau, puis vérifie leur état pendant le créneau
+surveillé — retard, suppression, changement de voie, perturbation du réseau — et
+expose le tout en commandes Jeedom.
 
 Il ne remplace pas un planificateur d'itinéraire. Il ne cherche pas le meilleur
 chemin, ne réserve rien, n'achète pas de billet et ne vous propose pas
@@ -59,7 +59,7 @@ Bloc **Surveillance** :
 | Seuil de retard | à partir de combien de minutes un train est « en retard ». 5 par défaut |
 | Surveillance à la minute | décochée, le trajet n'est plus relu qu'au quart d'heure |
 | Minutes d'avance | combien de minutes avant le créneau la surveillance à la minute démarre. 60 par défaut, 240 au maximum |
-| Nombre de trains | combien de départs suivre par créneau, de 1 à 12. 6 par défaut |
+| Nombre de trains | combien de départs suivre par créneau, de 1 à 6. 6 par défaut |
 | Commande à déclencher | la commande d'action Jeedom appelée dès qu'un problème apparaît. La croix la retire |
 
 Deux boutons complètent ce bloc : **Rafraîchir maintenant**, qui interroge iRail
@@ -79,7 +79,7 @@ Les trois autres onglets ne se configurent pas :
 
 - **Trains** liste les trains retenus — le jour, le départ, le retard, le train,
   la direction, la voie, l'arrivée, la durée, les correspondances, l'occupation —
-  avec l'heure de la dernière lecture et l'état de la surveillance. Il lit ce que
+  avec l'heure de la dernière vérification et l'état de la surveillance. Il lit ce que
   le plugin a déjà récupéré : l'ouvrir n'interroge pas iRail et ne consomme rien.
 - **Réseau** montre les perturbations publiées pour l'ensemble du réseau, votre
   trajet ou non, avec un bouton Actualiser. Celles qui citent une de vos deux
@@ -93,8 +93,11 @@ demandée, sans jamais s'arrêter de lui-même. Sans borne haute, un créneau de
 à 9 h remonterait aussi le train de 11 h, et vous réveillerait pour un retard
 qui ne vous concerne pas.
 
-Les jours actifs se cochent de lundi à dimanche. **Aucun jour coché vaut tous
-les jours** : c'est le réglage d'un trajet qui n'a pas d'horaire fixe.
+Les jours actifs se cochent de lundi à dimanche. Un trajet neuf est créé avec
+**lundi à vendredi cochés** : c'est le trajet de bureau, et cela évite qu'un
+nouveau trajet n'interroge le réseau le dimanche. Décochez-les tous et la règle
+s'inverse : **aucune case cochée vaut tous les jours**, pour un trajet sans
+horaire fixe.
 
 Le plugin suit deux créneaux à la fois : celui d'aujourd'hui et celui du
 prochain jour actif. Une fois le créneau du jour terminé, l'affichage bascule
@@ -106,7 +109,10 @@ demain matin ne bouge pas à la minute, et chaque lecture coûte un appel.
 > Un trajet coché du lundi au vendredi affiche le lundi dès le vendredi soir.
 
 Un créneau dont l'heure de fin précède l'heure de début est compris comme un
-créneau de nuit : `22:00` → `01:00` se termine le lendemain matin.
+créneau de nuit : `22:00` → `01:00` se termine le lendemain matin, et reste suivi
+après minuit — c'est très exactement l'heure à laquelle on le consulte. Un créneau
+dont le début et la fin sont identiques dure une heure, et non vingt-quatre : on a
+voulu un instant, pas une journée entière.
 
 ## La surveillance à la minute
 
@@ -128,7 +134,9 @@ gratuit, communautaire, sans clé d'API et sans facture : surveiller un trajet d
 7 h du matin vingt-quatre heures sur vingt-quatre ferait 1440 requêtes par jour
 pour en utiliser 120. Le plugin s'impose donc ses propres bornes :
 
-- le nombre de trains suivis est plafonné à 12 ;
+- le nombre de trains suivis est plafonné à 6. Ce n'est pas seulement de la
+  sobriété : iRail ignore silencieusement toute demande supérieure et rend six
+  connexions de toute façon ;
 - le délai de surveillance en amont est plafonné à 240 minutes ;
 - la commande « Rafraîchir » ne relit rien si la dernière lecture a moins de
   20 secondes, même appelée en boucle par un scénario ;
@@ -162,13 +170,17 @@ message de Jeedom :
 | `title` | `Train — <nom de l'équipement>` |
 | `message` | le trajet, puis les problèmes constatés, au plus trois |
 
-Sont considérés comme des problèmes :
+Trois situations, et trois seulement, comptent pour un problème :
 
-- un retard au départ égal ou supérieur au seuil ;
 - une suppression, au départ ou à l'arrivée ;
-- un changement de voie, quand iRail signale que la voie n'est pas l'habituelle ;
-- les alertes iRail rattachées au trajet, et les perturbations du réseau
-  rapprochées des deux gares.
+- un retard au départ égal ou supérieur au seuil ;
+- un changement de voie, quand iRail signale que la voie n'est pas l'habituelle.
+
+Les alertes iRail rattachées aux trains et les perturbations du réseau
+**n'appellent jamais cette commande**. Elles alimentent la commande « Message de
+perturbation » et peuvent allumer « Trajet perturbé », rien de plus : ce sont des
+textes libres, souvent des travaux ou des informations commerciales, qu'on lit
+mais qui ne justifient pas de réveiller quelqu'un.
 
 Un train déjà parti n'est plus signalé : continuer à alerter dessus ne ferait que
 retarder l'alerte sur le suivant.
@@ -194,7 +206,8 @@ plus de rien » :
 
 ## Commandes disponibles
 
-Vingt-trois commandes, dont trois visibles par défaut.
+Vingt-trois commandes, dont quatre visibles par défaut — trois tuiles et un
+bouton.
 
 | Commande | Type | Description |
 |---|---|---|
@@ -203,13 +216,13 @@ Vingt-trois commandes, dont trois visibles par défaut.
 | Trajet perturbé (`disturbed`) | info / binary | `1` dès qu'un train est supprimé, qu'une alerte est rattachée au prochain train, que sa voie change, ou qu'un retard atteint le seuil |
 | Départ prévu (`next_time`) | info / string | l'heure théorique, `HH:MM` |
 | Départ réel (`next_real`) | info / string | l'heure théorique augmentée du retard |
-| Départ dans (`next_countdown`) | info / numeric, min | minutes avant le départ réel. `-1` quand il n'y a aucun train |
+| Départ dans (`next_countdown`) | info / numeric, min | minutes avant le départ réel, jamais négatif. `-1` uniquement quand il n'y a aucun train |
 | Train (`next_vehicle`) | info / string | `IC 2137`, `S13424`... |
 | Direction (`next_direction`) | info / string | la destination affichée du train, pas votre gare d'arrivée |
 | Voie (`next_platform`) | info / string | vide quand iRail ne l'a pas encore publiée |
 | Changement de voie (`next_platform_changed`) | info / binary | `1` quand la voie n'est pas l'habituelle |
 | Prochain train supprimé (`next_canceled`) | info / binary | suppression au départ ou à l'arrivée |
-| Arrivée prévue (`next_arrival`) | info / string | l'heure d'arrivée, retard compris |
+| Arrivée réelle (`next_arrival`) | info / string | l'heure d'arrivée, retard d'arrivée compris |
 | Durée du trajet (`next_duration`) | info / numeric, min | |
 | Correspondances (`next_transfers`) | info / numeric | `0` pour un train direct |
 | Occupation (`next_occupancy`) | info / string | `Faible`, `Moyenne`, `Forte`, ou vide |
@@ -229,17 +242,23 @@ Quelques précisions qui évitent des scénarios faux :
 - le prochain train est le premier qui n'est pas encore parti, avec une minute
   de battement après son heure réelle : un train qu'on vient de rater n'est plus
   le prochain ;
-- « Départ dans » vaut `-1` quand aucun train n'est connu. Testez sur `>= 0`
-  avant de comparer à une durée ;
+- « Départ dans » ne descend jamais sous `0` tant qu'un train est connu, et vaut
+  `-1` quand il n'y en a aucun. Testez sur `>= 0` avant de comparer à une durée ;
+- « Trains du créneau », « Trains en retard », « Trains supprimés » et « Retard
+  maximum » portent sur **les deux créneaux connus** : celui d'aujourd'hui et
+  celui du prochain jour actif. Un train de demain matin annoncé à +30 gonfle
+  donc ces compteurs ce soir, et allume « Trajet perturbé » alors que plus rien
+  ne circule. Pour ne parler que du train qui vous concerne, servez-vous des
+  commandes du prochain train ;
 - « Occupation » est très souvent vide. iRail la publie à partir des retours des
   voyageurs de l'application SNCB : la plupart des trains n'en ont aucun. Un
   scénario ne doit pas dépendre de cette valeur.
 
 ## Sur le dashboard
 
-Trois commandes sont visibles par défaut : **Prochain train**, **Retard du
-prochain train** et **Trajet perturbé**, plus le bouton **Rafraîchir**. Les
-autres existent pour les scénarios et les graphiques, et resteraient sans cela
+Quatre commandes sont visibles par défaut : les tuiles **Prochain train**,
+**Retard du prochain train** et **Trajet perturbé**, et le bouton **Rafraîchir**.
+Les autres existent pour les scénarios et les graphiques, et resteraient sans cela
 empilées en une colonne de vingt tuiles pour un seul trajet. Pour en afficher
 une autre, rendez-la visible depuis l'onglet Commandes.
 
@@ -274,6 +293,11 @@ d'un coup d'oeil, sans avoir à distinguer un `0` d'un `1`.
 
 ## Utilisation dans un scénario
 
+Les exemples qui suivent sont du pseudo-code : ils montrent le déclencheur, la
+condition et l'idée de l'action, à traduire dans le bloc scénario de votre choix.
+`message::notification` y désigne la commande d'action de votre outil de
+notification — celle-là même que vous choisiriez comme commande à déclencher.
+
 Être prévenu d'un retard sérieux, sur événement :
 
 ```
@@ -284,14 +308,19 @@ Alors : message::notification avec
         + #[Maison][Train du matin][Retard du prochain train]# + " min"
 ```
 
-Partir plus tôt quand le train est supprimé :
+Savoir tout de suite qu'un train ne partira pas :
 
 ```
 Déclencheur : #[Maison][Train du matin][Prochain train supprimé]#
 Si : #[Maison][Train du matin][Prochain train supprimé]# == 1
 Alors : message::notification avec
-        "Train supprimé — départ suivant : " + #[Maison][Train du matin][Départ prévu]#
+        "Supprimé : " + #[Maison][Train du matin][Train]#
+        + " de " + #[Maison][Train du matin][Départ prévu]#
 ```
+
+> « Départ prévu » est l'heure du prochain train, supprimé compris : un train
+> supprimé reste le prochain tant qu'il n'a pas passé son heure. Ces commandes
+> décrivent ce train-là, pas celui d'après.
 
 Annoncer la voie au moment de sortir, à 7 h 10 :
 
@@ -350,11 +379,14 @@ dégraderait le service pour tout le monde.
 
 > Le rapprochement des perturbations du réseau se fait sur les **noms** des deux
 > gares du trajet, cherchés dans le titre et la description de la perturbation.
-> iRail ne publie pas la liste des gares concernées par une perturbation : c'est
-> tout ce que la source permet. Une perturbation « Malines - Termonde » remontera
-> donc sur tous les trajets qui mentionnent l'une de ces deux gares, même sans
-> rapport avec la portion coupée. Le plugin préfère ce faux positif — qui
-> informe — au faux négatif, qui laisse sur le quai.
+> iRail ne publie pas la liste des gares concernées : c'est tout ce que la source
+> permet. Le nom doit être trouvé entier, entre deux limites de mot — « Mol » ne
+> s'accroche donc plus à « Molenbeek » — et les noms de moins de quatre lettres
+> sont ignorés, faute de quoi « Ans » se reconnaîtrait dans « dans ». Il reste
+> qu'une perturbation « Malines - Termonde » remonte sur tous les trajets citant
+> l'une de ces deux gares, même sans rapport avec la portion coupée, et qu'une
+> gare au nom trop court ne remonte aucune perturbation. Le plugin préfère ce
+> faux positif — qui informe — au faux négatif, qui laisse sur le quai.
 
 Seuls les incidents en cours sont retenus. iRail mêle dans la même liste les
 incidents et les travaux programmés, ces derniers largement majoritaires : un

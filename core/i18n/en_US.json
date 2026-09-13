@@ -13,7 +13,6 @@
         "Voie": "Platform",
         "Changement de voie": "Platform change",
         "Prochain train supprimé": "Next train cancelled",
-        "Arrivée prévue": "Scheduled arrival",
         "Durée du trajet": "Journey duration",
         "Correspondances": "Connections",
         "Occupation": "Occupancy",
@@ -43,7 +42,8 @@
         "Moyenne": "Medium",
         "Forte": "High",
         "Aujourd'hui": "Today",
-        "Demain": "Tomorrow"
+        "Demain": "Tomorrow",
+        "Arrivée réelle": "Actual arrival"
     },
     "plugins/sncbnmbs/core/ajax/sncbnmbs.ajax.php": {
         "401 - Accès non autorisé": "401 - Access denied",
@@ -133,7 +133,6 @@
         "Minutes d'avance": "Minutes ahead",
         "Combien de temps avant le début du créneau la surveillance à la minute démarre. Comptez large : être prévenu chez soi permet encore de prendre le train d'avant.": "How long before the start of the time window minute-by-minute monitoring starts. Allow plenty: being warned at home still lets you catch the earlier train.",
         "Nombre de trains": "Number of trains",
-        "Nombre de départs demandés par créneau, 12 au maximum. Au-delà de ce que dure votre créneau, les trains supplémentaires ne vous concernent plus.": "Number of departures requested per time window, 12 at most. Beyond what your time window lasts, the extra trains no longer concern you.",
         "Commande à déclencher": "Command to trigger",
         "Aucune": "None",
         "Choisir une commande d'action": "Choose an action command",
@@ -144,7 +143,6 @@
         "Fait taire l'alerte en cours jusqu'au prochain changement de situation.": "Silences the current alert until the situation next changes.",
         "Acquitter l'alerte": "Acknowledge the alert",
         "Les trains du jour et du lendemain retenus pour ce trajet, tels que le réseau les annonce. Cet onglet lit ce que le plugin a déjà récupéré : l'ouvrir n'interroge pas le réseau.": "The trains for today and tomorrow selected for this journey, as the network announces them. This tab reads what the plugin has already fetched: opening it does not query the network.",
-        "Dernière lecture": "Last read",
         "Jour": "Day",
         "Départ": "Departure",
         "Retard": "Delay",
@@ -159,14 +157,15 @@
         "Actualiser": "Refresh",
         "Type": "Type",
         "Paramètres": "Parameters",
-        "Action": "Action"
+        "Action": "Action",
+        "Dernière vérification": "Last check",
+        "Nombre de départs demandés par créneau, 6 au maximum : au-delà, iRail ignore la demande sans le dire et en rend six quand même. Au-delà de ce que dure votre créneau, les trains supplémentaires ne vous concernent plus de toute façon.": "How many departures are requested per window, 6 at most: beyond that, iRail silently ignores the request and returns six anyway. Past the length of your window, the extra trains no longer concern you in any case."
     },
     "plugins/sncbnmbs/desktop/js/sncbnmbs.js": {
         "Jeedom n\\'a pas répondu.": "Jeedom did not answer.",
         "Jeedom n'a pas répondu.": "Jeedom did not answer.",
         "Enregistrez d\\'abord le trajet.": "Save the journey first.",
         "Enregistrez d'abord le trajet.": "Save the journey first.",
-        "Enregistrez vos modifications avant de continuer": "Save your changes before continuing",
         "min": "min",
         "Aucun résultat": "No result",
         "Choisissez votre gare": "Choose your station",
@@ -191,8 +190,12 @@
         "Tester": "Test",
         "Identifiant interne": "Internal identifier",
         "Saisissez au moins deux lettres du nom de la gare.": "Enter at least two letters of the station name.",
-        "Plusieurs gares correspondent, choisissez la vôtre.": "Several stations match, choose yours.",
         "Choisissez d\\'abord au moins une gare.": "Choose at least one station first.",
-        "Choisissez d'abord au moins une gare.": "Choose at least one station first."
+        "Choisissez d'abord au moins une gare.": "Choose at least one station first.",
+        "Cliquez d'abord sur Sauvegarder, en haut à droite.": "Click Save first, at the top right.",
+        "Cliquez d\\'abord sur Sauvegarder, en haut à droite.": "Click Save first, at the top right.",
+        "Commande introuvable — choisissez-en une autre": "Command not found — pick another one",
+        "Aucune gare ne correspond. Essayez sans accent ni tiret, par exemple « bruxelles midi ».": "No station matches. Try without accents or hyphens, for instance “bruxelles midi”.",
+        "Plusieurs gares correspondent, choisissez la vôtre dans la liste juste en dessous.": "Several stations match, pick yours from the list just below."
     }
 }

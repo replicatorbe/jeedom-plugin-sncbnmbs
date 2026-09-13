@@ -23,23 +23,22 @@ function sncbnmbs_install() {
 function sncbnmbs_update() {
 }
 
+/*
+ * Attention : le coeur appelle cette fonction à la DÉSACTIVATION du plugin
+ * (plugin::setIsEnable(0)), pas seulement à sa désinstallation. Y jeter la liste
+ * des 715 gares, mise en cache pour une semaine, obligerait à la retélécharger
+ * à chaque aller-retour dans la page des plugins. Seules les perturbations,
+ * périssables par nature, sont nettoyées ici.
+ */
 function sncbnmbs_remove() {
-    /*
-     * La liste des gares et les perturbations sont partagées par tous les
-     * trajets : aucun preRemove d'équipement ne les nettoie. Les laisser
-     * derrière soi ferait repartir une réinstallation sur des données peut-être
-     * périmées, sans moyen de le voir depuis l'interface.
-     */
-    foreach (array('stations', 'disturbances') as $family) {
-        foreach (array('fr', 'nl', 'de', 'en') as $lang) {
-            try {
-                $cache = cache::byKey('sncbnmbs::' . $family . '::' . $lang);
-                if (is_object($cache)) {
-                    $cache->remove();
-                }
-            } catch (Throwable $e) {
-                log::add('sncbnmbs', 'debug', __('Nettoyage du cache impossible :', __FILE__) . ' ' . $e->getMessage());
+    foreach (array('fr', 'nl', 'de', 'en') as $lang) {
+        try {
+            $cache = cache::byKey('sncbnmbs::disturbances::' . $lang);
+            if (is_object($cache)) {
+                $cache->remove();
             }
+        } catch (Throwable $e) {
+            log::add('sncbnmbs', 'debug', __('Nettoyage du cache impossible :', __FILE__) . ' ' . $e->getMessage());
         }
     }
 }
