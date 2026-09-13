@@ -91,9 +91,16 @@ class sncbnmbs extends eqLogic {
     const PROBLEM_PLATFORM = 'platform';
     const PROBLEM_CANCELED = 'canceled';
 
-    /* Message de rafraîchissement raté, transmis à l'appelant sans lever
-     * d'exception : le cron ne doit pas s'arrêter au premier trajet en panne. */
-    private $refreshError = '';
+    /*
+     * Message de rafraîchissement raté, transmis à l'appelant sans lever
+     * d'exception : le cron ne doit pas s'arrêter au premier trajet en panne.
+     *
+     * Le souligné n'est pas décoratif : DB::save() traite toute propriété qui
+     * n'en porte pas comme une colonne de la table (DB.class.php, « if ('_' !==
+     * $name[0]) »). Sans lui, la création d'un équipement échoue sur un
+     * « Unknown column 'refreshError' ».
+     */
+    private $_refreshError = '';
 
     /* ================================================================ WIDGETS */
 
@@ -431,10 +438,10 @@ class sncbnmbs extends eqLogic {
      * pas faire de ce plugin un client abusif.
      */
     public function update($_force = false) {
-        $this->refreshError = '';
+        $this->_refreshError = '';
         if (!$this->isConfigured()) {
-            $this->refreshError = $this->configurationError();
-            $this->reportProblem($this->refreshError);
+            $this->_refreshError = $this->configurationError();
+            $this->reportProblem($this->_refreshError);
             return array();
         }
 
@@ -462,7 +469,7 @@ class sncbnmbs extends eqLogic {
              * commandes sont recomposées depuis le cache, avec l'heure de la
              * dernière lecture réussie. L'erreur remonte à l'appelant.
              */
-            $this->refreshError = $e->getMessage();
+            $this->_refreshError = $e->getMessage();
             $this->reportProblem($e->getMessage());
             $this->refreshFromCache();
             return $previous;
@@ -1144,7 +1151,7 @@ class sncbnmbs extends eqLogic {
     }
 
     public function getRefreshError() {
-        return $this->refreshError;
+        return $this->_refreshError;
     }
 
     /* ================================================================= RÉGLAGES */
