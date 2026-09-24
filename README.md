@@ -7,8 +7,8 @@ Un équipement représente un trajet : une gare de départ, une gare d'arrivée,
 créneau horaire et les jours de la semaine concernés. Le plugin liste les trains
 du jour et du prochain jour actif, puis vérifie leur état : retard, suppression,
 changement de voie, perturbation du réseau. Chaque minute pendant le créneau
-surveillé et l'heure qui le précède, toutes les quinze minutes en dehors — iRail
-est gratuit, le plugin s'interdit d'en abuser.
+surveillé et l'heure qui le précède, une fois par heure en dehors et jamais
+entre 1 h et 5 h — iRail est gratuit, le plugin s'interdit d'en abuser.
 
 ## Ce que le plugin expose
 

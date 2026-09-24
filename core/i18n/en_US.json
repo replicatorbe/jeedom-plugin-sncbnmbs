@@ -36,6 +36,7 @@
         "iRail ne répond pas.": "iRail is not answering.",
         "Aucun trajet trouvé : vérifiez les gares et le créneau.": "No journey found: check the stations and the time window.",
         "iRail a refusé la demande :": "iRail rejected the request:",
+        "iRail est momentanément indisponible :": "iRail is temporarily unavailable:",
         "Réponse illisible d'iRail.": "Unreadable answer from iRail.",
         "Requête en échec :": "Request failed:",
         "Faible": "Low",
@@ -49,7 +50,8 @@
         "Train de repli (numéro)": "Fallback train (number)",
         "Repli dans": "Fallback in",
         "à": "at",
-        "repli :": "fallback:"
+        "repli :": "fallback:",
+        "Partir dans": "Leave in"
     },
     "plugins/sncbnmbs/core/ajax/sncbnmbs.ajax.php": {
         "401 - Accès non autorisé": "401 - Access denied",
@@ -165,7 +167,9 @@
         "Paramètres": "Parameters",
         "Action": "Action",
         "Dernière vérification": "Last check",
-        "Nombre de départs demandés par créneau, 6 au maximum : au-delà, iRail ignore la demande sans le dire et en rend six quand même. Au-delà de ce que dure votre créneau, les trains supplémentaires ne vous concernent plus de toute façon.": "How many departures are requested per window, 6 at most: beyond that, iRail silently ignores the request and returns six anyway. Past the length of your window, the extra trains no longer concern you in any case."
+        "Nombre de départs demandés par créneau, 6 au maximum : au-delà, iRail ignore la demande sans le dire et en rend six quand même. Au-delà de ce que dure votre créneau, les trains supplémentaires ne vous concernent plus de toute façon.": "How many departures are requested per window, 6 at most: beyond that, iRail silently ignores the request and returns six anyway. Past the length of your window, the extra trains no longer concern you in any case.",
+        "Temps jusqu'à la gare": "Time to the station",
+        "Le temps qu'il vous faut pour rejoindre la gare de départ. La commande « Partir dans » en déduit quand quitter la maison, retard compris : un scénario sur « Partir dans = 5 » vous dit de mettre votre manteau. Si le prochain train est supprimé, le calcul porte sur le train de repli.": "The time you need to reach the departure station. The \"Leave in\" command works out from it when to leave home, delay included: a scenario on \"Leave in = 5\" tells you to put your coat on. If the next train is cancelled, the count is based on the fallback train."
     },
     "plugins/sncbnmbs/desktop/js/sncbnmbs.js": {
         "Jeedom n\\'a pas répondu.": "Jeedom did not answer.",
@@ -178,8 +182,9 @@
         "Horaires indisponibles.": "Timetable unavailable.",
         "jamais": "never",
         "active, horaires relus chaque minute": "active, timetable read again every minute",
-        "en veille, relecture au quart d\\'heure": "idle, read again every quarter of an hour",
-        "en veille, relecture au quart d'heure": "idle, read again every quarter of an hour",
+        "créneau en cours sans surveillance à la minute, relecture au quart d\\'heure": "window in progress without minute-by-minute watching, read again every quarter of an hour",
+        "créneau en cours sans surveillance à la minute, relecture au quart d'heure": "window in progress without minute-by-minute watching, read again every quarter of an hour",
+        "en veille, relecture toutes les heures (aucune entre 1 h et 5 h)": "idle, read again every hour (none between 1 am and 5 am)",
         "Aucun train connu. Vérifiez les deux gares et le créneau, puis cliquez sur « Rafraîchir maintenant ».": "No known train. Check both stations and the time window, then click “Refresh now”.",
         "Prochain train": "Next train",
         "Supprimé": "Cancelled",

@@ -278,6 +278,18 @@ $eqLogics = eqLogic::byType($plugin->getId());
 								</div>
 							</div>
 							<div class="form-group">
+								<label class="col-sm-4 control-label">{{Temps jusqu'à la gare}}</label>
+								<div class="col-sm-3">
+									<div class="input-group">
+										<input type="number" min="0" max="120" step="1" class="eqLogicAttr form-control roundedLeft" data-l1key="configuration" data-l2key="walk_time" placeholder="0">
+										<span class="input-group-addon roundedRight">{{min}}</span>
+									</div>
+								</div>
+								<div class="col-sm-5">
+									<span class="help-block" style="margin:0;">{{Le temps qu'il vous faut pour rejoindre la gare de départ. La commande « Partir dans » en déduit quand quitter la maison, retard compris : un scénario sur « Partir dans = 5 » vous dit de mettre votre manteau. Si le prochain train est supprimé, le calcul porte sur le train de repli.}}</span>
+								</div>
+							</div>
+							<div class="form-group">
 								<label class="col-sm-4 control-label">{{Nombre de trains}}</label>
 								<div class="col-sm-3">
 									<input type="number" min="1" max="6" step="1" class="eqLogicAttr form-control" data-l1key="configuration" data-l2key="max_trains" placeholder="6">

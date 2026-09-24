@@ -54,8 +54,9 @@ typed: the plugin works with iRail identifiers, not with names.
 | Field | Value |
 |---|---|
 | Delay threshold | from how many minutes a train counts as "delayed". 5 by default |
-| Minute-by-minute watching | unticked, the journey is only read again once an hour |
+| Minute-by-minute watching | unticked, the journey is only read again every quarter of an hour during the window and its lead time, once an hour outside |
 | Minutes ahead | how many minutes before the window the minute-by-minute watch starts. 60 by default, 240 at most |
+| Time to the station | minutes needed to reach the departure station, from 0 to 120. Used to compute "Leave in". 0 by default |
 | Number of trains | how many departures to follow per window, from 1 to 6. 6 by default |
 | Command to trigger | the Jeedom action command called as soon as a problem shows up. The cross clears it |
 
@@ -138,11 +139,13 @@ plugin therefore sets its own bounds:
   stations, the window, the days or the number of trains. Renaming the device or
   changing its icon costs no call;
 - network disturbances are shared between all journeys and read again every
-  three minutes, whatever the number of devices.
+  ten minutes, only while watching, whatever the number of devices.
 
-The "Minute-by-minute watching" box turns that watch off without deleting the
-journey: the quarter-hourly read still applies, and the timetable stays
-readable.
+The "Minute-by-minute watching" box spaces that watch out without deleting the
+journey: during the window and its lead time, the journey is only read again
+**every quarter of an hour** — night included for a night window —, and once an
+hour outside. Alerts are still sent, up to fifteen minutes late; the timetable
+stays readable.
 
 After a failure, the journey **waits before trying again**, and the wait doubles
 with every further failure: one minute, two, four, up to an hour. **Never more
@@ -154,8 +157,13 @@ wrong station costs twenty-four requests a day instead of twelve hundred. The
 first success resets the counter.
 
 When iRail does not answer, nothing is erased. The last known timetable stays
-displayed, the "Last check" command keeps the time of the last successful read,
-and a message appears in the message centre.
+displayed, the "Last check" command keeps the time of the last successful read.
+An unknown station or a rejected request is reported at once in the message
+centre. A transient iRail failure — overloaded service (5xx error), timeout,
+unreadable answer — only shows up there from the **third failure in a row**:
+some mornings iRail returns a dozen isolated 504 errors that clear up on their
+own the next minute. Until then, it is only logged as a warning in the plugin
+log.
 
 ## Acting on a delay
 
@@ -231,10 +239,11 @@ button.
 |---|---|---|
 | Next train (`summary`) | info / string | the summary line: `IC 2137 · 07:42 · +5 min · platform 3`, or `No train in the window` |
 | Next train delay (`next_delay`) | info / numeric, min | historised. `0` when the train is on time |
-| Journey disrupted (`disturbed`) | info / binary | `1` as soon as a train is cancelled, an alert is attached to the next train, its platform changes, or a delay reaches the threshold |
+| Journey disrupted (`disturbed`) | info / binary | `1` as soon as a train of the current window that has not left yet is cancelled, an alert is attached to the next train, its platform changes, or a delay reaches the threshold |
 | Scheduled departure (`next_time`) | info / string | the timetable time, `HH:MM` |
 | Actual departure (`next_real`) | info / string | the timetable time plus the delay |
 | Departure in (`next_countdown`) | info / numeric, min | minutes before the actual departure, never negative. `-1` only when there is no train at all |
+| Leave in (`leave_countdown`) | info / numeric, min | minutes before you must leave home: actual departure minus the time to the station, never negative (`0` = leave now). If the next train is cancelled, computed on the fallback train. `-1` when there is no train to catch |
 | Train (`next_vehicle`) | info / string | `IC 2137`, `S13424`... |
 | Direction (`next_direction`) | info / string | the train's displayed destination, not your arrival station |
 | Platform (`next_platform`) | info / string | empty while iRail has not published it |
@@ -248,11 +257,11 @@ button.
 | Fallback departure (`next2_time`) | info / string | its timetable time, `HH:MM` |
 | Fallback train (number) (`next2_vehicle`) | info / string | `P 7800`, `IC 3706`… |
 | Fallback in (`next2_countdown`) | info / numeric, min | minutes before its actual departure. `-1` when there is no fallback |
-| Trains in the window (`trains_count`) | info / numeric | number of known trains, both days together |
+| Trains in the window (`trains_count`) | info / numeric | number of trains of the next train's window that have not left yet. Trains already gone and those of the following window are not counted, nor in the next three commands; `0` when no train is expected any more |
 | Delayed trains (`trains_delayed`) | info / numeric | historised. Any delay, even of one minute |
 | Cancelled trains (`trains_canceled`) | info / numeric | historised |
-| Maximum delay (`delay_max`) | info / numeric, min | the worst delay of the window |
-| Disturbance message (`alert_message`) | info / string | the iRail alerts and the network disturbances, at most three, separated by dashes |
+| Maximum delay (`delay_max`) | info / numeric, min | the worst delay among the window's trains that have not left yet |
+| Disturbance message (`alert_message`) | info / string | the iRail alerts of the window's trains that have not left yet and the network disturbances, at most three, separated by dashes |
 | Last check (`last_update`) | info / string | the time of the last **successful** read, `DD/MM/YYYY HH:MM` |
 | Refresh (`refresh`) | action | forces a read from iRail, no more than once every 20 seconds |
 | Acknowledge alert (`acknowledge`) | action | silences the alerts of the trains currently in trouble; the others stay watched |

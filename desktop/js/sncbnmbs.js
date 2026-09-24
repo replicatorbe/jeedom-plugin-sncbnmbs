@@ -414,9 +414,13 @@ function sncbnmbsRenderBoard(_board) {
     /* Dire ce que l'état implique, et non seulement son nom : « en veille »
        seul laisserait croire à une panne alors que c'est le comportement
        attendu hors créneau. */
-    watching.textContent = (_board.watching === true)
-      ? '{{active, horaires relus chaque minute}}'
-      : '{{en veille, relecture au quart d\'heure}}'
+    if (_board.watching === true) {
+      watching.textContent = '{{active, horaires relus chaque minute}}'
+    } else if (_board.inSlot === true) {
+      watching.textContent = '{{créneau en cours sans surveillance à la minute, relecture au quart d\'heure}}'
+    } else {
+      watching.textContent = '{{en veille, relecture toutes les heures (aucune entre 1 h et 5 h)}}'
+    }
   }
 
   /*

@@ -57,8 +57,9 @@ Bloc **Surveillance** :
 | Champ | Valeur |
 |---|---|
 | Seuil de retard | à partir de combien de minutes un train est « en retard ». 5 par défaut |
-| Surveillance à la minute | décochée, le trajet n'est plus relu qu'une fois par heure |
+| Surveillance à la minute | décochée, le trajet n'est plus relu qu'au quart d'heure pendant le créneau et son avance, une fois par heure en dehors |
 | Minutes d'avance | combien de minutes avant le créneau la surveillance à la minute démarre. 60 par défaut, 240 au maximum |
+| Temps jusqu'à la gare | minutes pour rejoindre la gare de départ, de 0 à 120. Sert au calcul de « Partir dans ». 0 par défaut |
 | Nombre de trains | combien de départs suivre par créneau, de 1 à 6. 6 par défaut |
 | Commande à déclencher | la commande d'action Jeedom appelée dès qu'un problème apparaît. La croix la retire |
 
@@ -145,11 +146,14 @@ pour en utiliser 120. Le plugin s'impose donc ses propres bornes :
   les gares, le créneau, les jours ou le nombre de trains. Renommer l'équipement
   ou changer son icône ne coûte aucun appel ;
 - les perturbations du réseau sont mutualisées entre tous les trajets et
-  relues toutes les trois minutes, quel que soit le nombre d'équipements.
+  relues toutes les dix minutes, pendant la surveillance seulement, quel que
+  soit le nombre d'équipements.
 
-La case « Surveillance à la minute » coupe cette surveillance sans supprimer le
-trajet : la lecture horaire continue de s'appliquer, et les horaires restent
-consultables.
+La case « Surveillance à la minute » espace cette surveillance sans supprimer le
+trajet : pendant le créneau et son avance, le trajet n'est plus relu qu'au
+**quart d'heure** — nuit comprise pour un créneau de nuit —, et une fois par
+heure en dehors. Les alertes partent toujours, avec jusqu'à quinze minutes de
+retard ; les horaires restent consultables.
 
 Après un échec, le trajet **attend avant de réessayer**, et l'attente double à
 chaque nouvel échec : une minute, deux, quatre, jusqu'à une heure. **Jamais plus
@@ -162,7 +166,12 @@ cents. Le premier succès remet le compteur à zéro.
 
 Quand iRail ne répond pas, rien n'est effacé. Les derniers horaires connus
 restent affichés, la commande « Dernière vérification » garde l'heure de la
-dernière lecture réussie, et un message apparaît au centre de messages.
+dernière lecture réussie. Une gare inconnue ou une demande refusée est signalée
+aussitôt au centre de messages. Une panne passagère d'iRail — service saturé
+(erreur 5xx), délai dépassé, réponse illisible — n'y apparaît qu'à partir du
+**troisième échec consécutif** : iRail rend certains matins une dizaine d'erreurs
+504 isolées, qui se résorbent seules la minute suivante. D'ici là, elle n'est
+notée qu'en avertissement dans le journal du plugin.
 
 ## Agir sur un retard
 
@@ -242,10 +251,11 @@ bouton.
 |---|---|---|
 | Prochain train (`summary`) | info / string | la ligne de résumé : `IC 2137 · 07:42 · +5 min · voie 3`, ou `Aucun train dans le créneau` |
 | Retard du prochain train (`next_delay`) | info / numeric, min | historisée. `0` quand le train est à l'heure |
-| Trajet perturbé (`disturbed`) | info / binary | `1` dès qu'un train est supprimé, qu'une alerte est rattachée au prochain train, que sa voie change, ou qu'un retard atteint le seuil |
+| Trajet perturbé (`disturbed`) | info / binary | `1` dès qu'un train du créneau en cours, pas encore parti, est supprimé, qu'une alerte est rattachée au prochain train, que sa voie change, ou qu'un retard atteint le seuil |
 | Départ prévu (`next_time`) | info / string | l'heure théorique, `HH:MM` |
 | Départ réel (`next_real`) | info / string | l'heure théorique augmentée du retard |
 | Départ dans (`next_countdown`) | info / numeric, min | minutes avant le départ réel, jamais négatif. `-1` uniquement quand il n'y a aucun train |
+| Partir dans (`leave_countdown`) | info / numeric, min | minutes avant de devoir quitter la maison : départ réel moins le temps jusqu'à la gare, jamais négatif (`0` = partez maintenant). Si le prochain train est supprimé, calculé sur le train de repli. `-1` quand il n'y a aucun train à prendre |
 | Train (`next_vehicle`) | info / string | `IC 2137`, `S13424`... |
 | Direction (`next_direction`) | info / string | la destination affichée du train, pas votre gare d'arrivée |
 | Voie (`next_platform`) | info / string | vide quand iRail ne l'a pas encore publiée |
@@ -259,11 +269,11 @@ bouton.
 | Départ du repli (`next2_time`) | info / string | son heure théorique, `HH:MM` |
 | Train de repli (numéro) (`next2_vehicle`) | info / string | `P 7800`, `IC 3706`… |
 | Repli dans (`next2_countdown`) | info / numeric, min | minutes avant son départ réel. `-1` quand il n'y a pas de repli |
-| Trains du créneau (`trains_count`) | info / numeric | nombre de trains connus, les deux jours confondus |
+| Trains du créneau (`trains_count`) | info / numeric | nombre de trains du créneau du prochain train pas encore partis. Les trains déjà partis et ceux du créneau suivant ne sont pas comptés, pas plus que dans les trois commandes suivantes ; `0` quand plus aucun train n'est attendu |
 | Trains en retard (`trains_delayed`) | info / numeric | historisée. Tout retard, même d'une minute |
 | Trains supprimés (`trains_canceled`) | info / numeric | historisée |
-| Retard maximum (`delay_max`) | info / numeric, min | le pire retard du créneau |
-| Message de perturbation (`alert_message`) | info / string | les alertes iRail et les perturbations du réseau, au plus trois, séparées par des tirets |
+| Retard maximum (`delay_max`) | info / numeric, min | le pire retard parmi les trains du créneau pas encore partis |
+| Message de perturbation (`alert_message`) | info / string | les alertes iRail des trains du créneau pas encore partis et les perturbations du réseau, au plus trois, séparées par des tirets |
 | Dernière vérification (`last_update`) | info / string | l'heure de la dernière lecture **réussie**, `JJ/MM/AAAA HH:MM` |
 | Rafraîchir (`refresh`) | action | force une lecture d'iRail, pas plus d'une toutes les 20 secondes |
 | Acquitter l'alerte (`acknowledge`) | action | fait taire les alertes des trains actuellement en défaut ; les autres restent surveillés |

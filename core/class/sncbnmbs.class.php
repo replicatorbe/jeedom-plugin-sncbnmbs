@@ -17,6 +17,14 @@
 
 require_once __DIR__ . '/../../../../core/php/core.inc.php';
 
+/*
+ * Échec d'iRail qui se résorbera seul : service saturé (5xx, 429), délai
+ * dépassé, réponse illisible. Le distinguer d'une gare inconnue permet de ne
+ * pas alerter l'utilisateur au premier hoquet — voir update().
+ */
+class sncbnmbsTransientException extends Exception {
+}
+
 class sncbnmbs extends eqLogic {
 
     /*
@@ -57,6 +65,13 @@ class sncbnmbs extends eqLogic {
     const IDLE_INTERVAL = 3600;
 
     /*
+     * Dans le créneau, mais surveillance à la minute décochée : un quart
+     * d'heure. C'est ce que promet l'aide du formulaire, et l'heure d'IDLE_INTERVAL
+     * aurait fait partir une suppression après le train qu'elle annonçait.
+     */
+    const SLOT_INTERVAL = 900;
+
+    /*
      * Et la nuit, rien du tout : la SNCB ne fait plus circuler grand-chose entre
      * une heure et cinq heures, et le navetteur dort. La fenêtre de surveillance,
      * elle, reste prioritaire — un créneau de nuit continue d'être suivi.
@@ -83,6 +98,9 @@ class sncbnmbs extends eqLogic {
      */
     const BACKOFF_WATCHING_MAX = 120;
 
+    /* Échecs passagers consécutifs tolérés avant d'alerter le centre de messages. */
+    const TRANSIENT_REPORT_AFTER = 3;
+
     /* Garde-fou contre un scénario qui appellerait « Rafraîchir » en boucle. */
     const FORCE_MIN_INTERVAL = 20;
 
@@ -108,6 +126,8 @@ class sncbnmbs extends eqLogic {
     const DEFAULT_MAX_TRAINS = 6;
     const DEFAULT_THRESHOLD  = 5;
     const DEFAULT_WATCH_BEFORE = 60;
+    /* Zéro : « Partir dans » vaut alors « Départ dans », rien n'est inventé. */
+    const DEFAULT_WALK_TIME = 0;
 
     /*
      * Bornes de sécurité : iRail est un service gratuit et communautaire.
@@ -117,6 +137,7 @@ class sncbnmbs extends eqLogic {
      */
     const MAX_TRAINS = 6;
     const MAX_WATCH_BEFORE = 240;
+    const MAX_WALK_TIME = 120;
 
     /* Types de problème, par ordre de gravité croissante. */
     const PROBLEM_DELAY    = 'delay';
@@ -200,6 +221,9 @@ class sncbnmbs extends eqLogic {
             $attente = isset($backoff['wait']) ? (int) $backoff['wait'] : self::BACKOFF_BASE;
             if ($this->isWatching($now)) {
                 $attente = min($attente, self::BACKOFF_WATCHING_MAX);
+            } elseif ($this->inSlot($now)) {
+                // Le recul ne doit pas espacer les lectures plus que la cadence normale.
+                $attente = min($attente, self::SLOT_INTERVAL);
             }
             if ($now < ($backoff['at'] + $attente)) {
                 return false;
@@ -212,6 +236,13 @@ class sncbnmbs extends eqLogic {
         if ($this->isWatching($now)) {
             return $age >= 55;
         }
+        /*
+         * Avant les heures calmes : un créneau de nuit dont la surveillance à
+         * la minute est décochée reste suivi, au quart d'heure.
+         */
+        if ($this->inSlot($now)) {
+            return $age >= self::SLOT_INTERVAL - 5;
+        }
         $heure = (int) date('G', $now);
         if ($heure >= self::QUIET_FROM && $heure < self::QUIET_TO) {
             return false;
@@ -219,16 +250,22 @@ class sncbnmbs extends eqLogic {
         return $age >= self::IDLE_INTERVAL;
     }
 
-    /*
-     * Dans la fenêtre de surveillance : le créneau du jour, élargi en amont de
-     * watch_before minutes pour que l'utilisateur soit prévenu avant de partir
-     * de chez lui, et non sur le quai.
-     */
+    /* Dans la fenêtre de surveillance, et la surveillance à la minute est cochée. */
     public function isWatching($_now = null) {
-        $now = ($_now === null) ? time() : $_now;
         if ($this->getConfiguration('watch_enabled', 1) == 0) {
             return false;
         }
+        return $this->inSlot($_now);
+    }
+
+    /*
+     * Dans le créneau du jour, élargi en amont de watch_before minutes pour que
+     * l'utilisateur soit prévenu avant de partir de chez lui, et non sur le
+     * quai. Indépendant de la case « surveillance à la minute » : décochée, elle
+     * espace les lectures, elle ne fait pas sortir du créneau.
+     */
+    public function inSlot($_now = null) {
+        $now = ($_now === null) ? time() : $_now;
         foreach ($this->slots($now) as $slot) {
             $before = $slot['start'] - ($this->watchBefore() * 60);
             if ($now >= $before && $now <= $slot['end']) {
@@ -266,6 +303,7 @@ class sncbnmbs extends eqLogic {
             'threshold'    => self::DEFAULT_THRESHOLD,
             'watch_before' => self::DEFAULT_WATCH_BEFORE,
             'watch_enabled' => 1,
+            'walk_time'    => self::DEFAULT_WALK_TIME,
         ) as $key => $default) {
             if ($this->getConfiguration($key, '') === '') {
                 $this->setConfiguration($key, $default);
@@ -413,14 +451,24 @@ class sncbnmbs extends eqLogic {
             'icon' => 'fas fa-hourglass-half',
         ));
         /*
-         * Les seuils ne sont posés qu'à la création : ils colorent la tuile sans
-         * aucun réglage, mais l'utilisateur qui les change ensuite doit garder
-         * la main. Le seuil « danger » suit celui du trajet, pour que la couleur
-         * et la notification disent la même chose.
+         * Les seuils colorent la tuile sans aucun réglage, mais l'utilisateur qui
+         * les change doit garder la main. Le seuil « danger » suit celui du
+         * trajet, pour que la couleur et la notification disent la même chose.
          */
+        $dangerif = '#value# >= ' . $this->threshold();
         if ($delay->getAlert('warningif') == '' && $delay->getAlert('dangerif') == '') {
             $delay->setAlert('warningif', '#value# >= 1');
-            $delay->setAlert('dangerif', '#value# >= ' . $this->threshold());
+            $delay->setAlert('dangerif', $dangerif);
+            $delay->setConfiguration('auto_dangerif', $dangerif);
+            $delay->save();
+        } elseif ($delay->getAlert('dangerif') !== $dangerif && $this->isAutoDangerif($delay)) {
+            /*
+             * Posé une fois pour toutes, ce seuil trahissait le trajet dès que
+             * l'utilisateur relevait le sien : tuile rouge à 5 min, notification
+             * à 10. Il est donc réaligné — tant qu'il est encore le nôtre.
+             */
+            $delay->setAlert('dangerif', $dangerif);
+            $delay->setConfiguration('auto_dangerif', $dangerif);
             $delay->save();
         }
         $this->addCmdIfMissing('disturbed', 'Trajet perturbé', 'info', 'binary', array(
@@ -432,6 +480,10 @@ class sncbnmbs extends eqLogic {
         $this->addCmdIfMissing('next_time', 'Départ prévu', 'info', 'string', array('order' => $order++));
         $this->addCmdIfMissing('next_real', 'Départ réel', 'info', 'string', array('order' => $order++));
         $this->addCmdIfMissing('next_countdown', 'Départ dans', 'info', 'numeric', array(
+            'order' => $order++, 'unite' => 'min',
+        ));
+        /* Ce que le navetteur veut vraiment savoir : quand quitter la maison. */
+        $this->addCmdIfMissing('leave_countdown', 'Partir dans', 'info', 'numeric', array(
             'order' => $order++, 'unite' => 'min',
         ));
         $this->addCmdIfMissing('next_vehicle', 'Train', 'info', 'string', array('order' => $order++));
@@ -488,6 +540,21 @@ class sncbnmbs extends eqLogic {
         $this->addCmdIfMissing('acknowledge', 'Acquitter l\'alerte', 'action', 'other', array(
             'order' => $order++, 'icon' => 'fas fa-bell-slash',
         ));
+    }
+
+    /*
+     * Le seuil « danger » est-il encore celui que le plugin a posé ? La valeur
+     * posée est mémorisée depuis la 1.2 ; avant, seule sa forme la trahit :
+     * « #value# >= N », exactement. Toute autre écriture vient de l'utilisateur
+     * et ne sera jamais touchée.
+     */
+    private function isAutoDangerif($_cmd) {
+        $current = $_cmd->getAlert('dangerif');
+        $auto = $_cmd->getConfiguration('auto_dangerif', '');
+        if ($auto !== '') {
+            return $current === $auto;
+        }
+        return preg_match('/^#value# >= \d+$/', $current) === 1;
     }
 
     /*
@@ -553,9 +620,25 @@ class sncbnmbs extends eqLogic {
              * commandes sont recomposées depuis le cache, avec l'heure de la
              * dernière lecture réussie. L'erreur remonte à l'appelant.
              */
-            $this->noteFailure($now);
+            $fails = $this->noteFailure($now);
             $this->_refreshError = $e->getMessage();
-            $this->reportProblem($e->getMessage());
+            /*
+             * iRail rend des 504 par grappes, certains matins une dizaine en
+             * une heure, qui se résorbent seuls à la minute suivante. Les
+             * signaler un par un faisait clignoter le centre de messages pour
+             * une panne dont l'utilisateur ne peut rien faire. Une panne
+             * passagère n'y entre qu'une fois installée ; une gare inconnue,
+             * elle, ne se corrigera pas seule et reste signalée aussitôt.
+             */
+            if ($e instanceof sncbnmbsTransientException) {
+                if ($fails >= self::TRANSIENT_REPORT_AFTER) {
+                    $this->reportProblem($e->getMessage());
+                } else {
+                    log::add(__CLASS__, 'warning', $this->getHumanName() . ' ' . $e->getMessage());
+                }
+            } else {
+                $this->reportProblem($e->getMessage());
+            }
             $this->refreshFromCache();
             return $previous;
         }
@@ -843,14 +926,15 @@ class sncbnmbs extends eqLogic {
         $now = time();
         $trains = isset($_journeys['trains']) ? $_journeys['trains'] : array();
         $next = $this->nextTrain($trains, $now);
+        $current = $this->currentSlotTrains($trains, $next, $now);
 
-        $count = count($trains);
+        $count = count($current);
         $delayed = 0;
         $canceled = 0;
         $maxDelay = 0;
         $messages = array();
 
-        foreach ($trains as $train) {
+        foreach ($current as $train) {
             if ($train['depCanceled'] || $train['arrCanceled']) {
                 $canceled++;
             }
@@ -900,6 +984,8 @@ class sncbnmbs extends eqLogic {
             $this->publishCmd('next2_vehicle', $fallback['vehicle']);
             $this->publishCmd('next2_countdown', max(0, (int) floor((($fallback['depTs'] + $fallback['depDelay']) - $now) / 60)));
         }
+
+        $this->publishCmd('leave_countdown', $this->leaveCountdown($next, $fallback, $now));
 
         if ($next === null) {
             $this->publishCmd('summary', __('Aucun train dans le créneau', __FILE__));
@@ -995,6 +1081,55 @@ class sncbnmbs extends eqLogic {
         return null;
     }
 
+    /*
+     * Minutes avant de devoir quitter la maison : départ réel du train à
+     * prendre, moins le temps pour rejoindre la gare. Le train à prendre est le
+     * prochain, sauf s'il est supprimé : c'est alors le repli qu'il faut aller
+     * attraper, et compter sur un train qui ne partira pas ferait partir
+     * l'utilisateur pour rien. Sans train prenable, -1, comme « Départ dans ».
+     * Plancher à zéro : « il est temps » se teste sur == 0, et un négatif se
+     * confondrait avec l'absence de train.
+     */
+    private function leaveCountdown($_next, $_fallback, $_now) {
+        $train = $_next;
+        if ($train !== null && ($train['depCanceled'] || $train['arrCanceled'])) {
+            $train = $_fallback;
+        }
+        if ($train === null) {
+            return -1;
+        }
+        $seconds = ($train['depTs'] + $train['depDelay']) - $_now - ($this->walkTime() * 60);
+        return max(0, (int) floor($seconds / 60));
+    }
+
+    /*
+     * Les trains qui comptent encore : ceux du créneau du prochain train, pas
+     * encore partis. Le cache mêle le créneau du jour et le suivant, et garde
+     * les trains partis jusqu'à la relecture : tout compter faisait afficher
+     * douze « trains du créneau », et un train parti avec vingt minutes de
+     * retard laissait le trajet « perturbé » bien après son départ. Sans
+     * prochain train, il n'y a plus rien devant : l'ensemble est vide.
+     */
+    private function currentSlotTrains($_trains, $_next, $_now) {
+        if ($_next === null) {
+            return array();
+        }
+        $current = array();
+        foreach ($_trains as $train) {
+            if ($train['date'] !== $_next['date']) {
+                continue;
+            }
+            /* Même battement d'une minute que nextTrain() : le prochain train
+             * doit toujours figurer parmi les trains qu'on compte. */
+            if ($train['left'] || ($train['depTs'] + $train['depDelay']) < ($_now - 60)) {
+                continue;
+            }
+            $current[] = $train;
+        }
+        return $current;
+    }
+
+    /* $_canceled et $_maxDelay ne portent que sur currentSlotTrains(). */
     private function isDisturbed($_train, $_canceled, $_maxDelay) {
         if ($_train['depCanceled'] || $_train['arrCanceled'] || !$_train['depPlatformNormal']) {
             return true;
@@ -1324,6 +1459,8 @@ class sncbnmbs extends eqLogic {
             'at'    => $now,
             'wait'  => $attente,
         ), 86400);
+        // Rendu à update(), qui ne signale une panne passagère qu'une fois installée.
+        return $fails;
     }
 
     private function clearBackoff() {
@@ -1393,6 +1530,11 @@ class sncbnmbs extends eqLogic {
 
     public function watchBefore() {
         return min(self::MAX_WATCH_BEFORE, max(0, (int) $this->getConfiguration('watch_before', self::DEFAULT_WATCH_BEFORE)));
+    }
+
+    /* Minutes à pied, à vélo ou en voiture jusqu'à la gare de départ. */
+    public function walkTime() {
+        return min(self::MAX_WALK_TIME, max(0, (int) $this->getConfiguration('walk_time', self::DEFAULT_WALK_TIME)));
     }
 
     /* Les jours retenus, en numérotation ISO (1 = lundi). Aucun coché = tous. */
@@ -1619,7 +1761,7 @@ class sncbnmbs extends eqLogic {
         $body = self::httpGet($url, $code);
 
         if ($body === false) {
-            throw new Exception(__('iRail ne répond pas.', __FILE__));
+            throw new sncbnmbsTransientException(__('iRail ne répond pas.', __FILE__));
         }
         if ($code == 400 || $code == 404) {
             /*
@@ -1630,13 +1772,21 @@ class sncbnmbs extends eqLogic {
              */
             throw new Exception(__('Aucun trajet trouvé : vérifiez les gares et le créneau.', __FILE__));
         }
+        /*
+         * 5xx et 429 disent « pas maintenant », pas « jamais » : iRail rend des
+         * 504 par grappes, résorbées d'elles-mêmes la minute suivante.
+         */
+        if ($code >= 500 || $code == 429) {
+            throw new sncbnmbsTransientException(__('iRail est momentanément indisponible :', __FILE__) . ' HTTP ' . $code);
+        }
         if ($code < 200 || $code >= 300) {
             throw new Exception(__('iRail a refusé la demande :', __FILE__) . ' HTTP ' . $code);
         }
 
         $data = json_decode($body, true);
         if (!is_array($data)) {
-            throw new Exception(__('Réponse illisible d\'iRail.', __FILE__));
+            // Une page d'erreur d'un intermédiaire, le plus souvent : passagère.
+            throw new sncbnmbsTransientException(__('Réponse illisible d\'iRail.', __FILE__));
         }
         return $data;
     }
@@ -1829,6 +1979,7 @@ class sncbnmbs extends eqLogic {
             'route'       => $this->routeLabel(),
             'lastUpdate'  => isset($journeys['fetchedAt']) ? date('d/m/Y H:i', $journeys['fetchedAt']) : '',
             'watching'    => $this->isWatching($now),
+            'inSlot'      => $this->inSlot($now),
             'threshold'   => $this->threshold(),
             'trains'      => $rows,
             'disturbances' => $this->matchingDisturbances(false),

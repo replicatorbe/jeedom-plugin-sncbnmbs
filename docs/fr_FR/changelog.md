@@ -1,5 +1,29 @@
 # Changelog du plugin SNCB/NMBS
 
+## 1.2 (en cours)
+
+**Partir à temps**
+
+- Nouveau réglage « Temps jusqu'à la gare » et nouvelle commande « Partir dans »
+  (`leave_countdown`) : les minutes avant de devoir quitter la maison, retard
+  compris. Si le prochain train est supprimé, le calcul porte sur le train de
+  repli.
+
+**Corrections**
+
+- Surveillance à la minute décochée : le trajet n'était plus relu qu'une fois
+  par heure, même pendant le créneau. Il l'est de nouveau au quart d'heure,
+  comme l'annonce l'aide.
+- Les pannes passagères d'iRail (HTTP 5xx, délai dépassé) ne vont plus au
+  centre de messages qu'à partir du troisième échec consécutif ; avant, elles
+  sont notées en avertissement dans le journal.
+- « Trajet perturbé », « Trains du créneau », « Trains en retard », « Trains
+  supprimés » et « Retard maximum » ne comptent plus que les trains du créneau
+  en cours encore à venir : un train parti en retard ou un train du lendemain
+  ne maintient plus le trajet « perturbé ».
+- Le seuil de couleur rouge de « Retard du prochain train » suit désormais le
+  seuil du trajet quand il est modifié, sauf s'il a été personnalisé.
+
 ## 1.1
 
 **Le train de repli**

@@ -1,5 +1,27 @@
 # SNCB/NMBS plugin changelog
 
+## 1.2 (in progress)
+
+**Leaving on time**
+
+- New "Time to the station" setting and new "Leave in" command
+  (`leave_countdown`): minutes before you must leave home, delay included. If
+  the next train is cancelled, the count is based on the fallback train.
+
+**Fixes**
+
+- Minute-by-minute watching unticked: the journey was only read once an hour,
+  even during the time window. It is read every quarter of an hour again, as
+  the help text says.
+- Transient iRail failures (HTTP 5xx, timeout) only reach the message centre
+  from the third consecutive failure; before that, they are logged as warnings.
+- "Disrupted journey", "Trains in window", "Delayed trains", "Cancelled
+  trains" and "Maximum delay" now only count the upcoming trains of the current
+  window: a train that left late, or tomorrow's trains, no longer keep the
+  journey "disrupted".
+- The red colour threshold of "Next train delay" now follows the journey's
+  threshold when it changes, unless it was customised.
+
 ## 1.1
 
 **The fallback train**
