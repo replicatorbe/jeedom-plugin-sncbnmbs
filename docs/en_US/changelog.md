@@ -1,6 +1,6 @@
 # SNCB/NMBS plugin changelog
 
-## 1.2 (in progress)
+## 1.2
 
 **Leaving on time**
 

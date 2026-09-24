@@ -1,6 +1,6 @@
 # Changelog du plugin SNCB/NMBS
 
-## 1.2 (en cours)
+## 1.2
 
 **Partir à temps**
 

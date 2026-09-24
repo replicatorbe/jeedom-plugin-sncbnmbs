@@ -1,7 +1,7 @@
 {
     "id": "sncbnmbs",
     "name": "SNCB/NMBS",
-    "pluginVersion": "1.1",
+    "pluginVersion": "1.2",
     "description": {
         "fr_FR": "Surveillance des trains SNCB/NMBS pour navetteurs, à partir des données ouvertes iRail. Chaque équipement représente un trajet (gare de départ, gare d'arrivée, créneau horaire, jours concernés) : le plugin liste les trains du jour et du lendemain, puis contrôle chaque minute, pendant le créneau surveillé, les retards, les suppressions, les changements de quai et les perturbations du réseau. Les commandes info exposées (retard du prochain train, compte à rebours, quai, trajet perturbé) déclenchent vos scénarios, et une commande d'action Jeedom peut être appelée automatiquement dès qu'un retard dépasse le seuil choisi.",
         "en_US": "SNCB/NMBS train monitoring for commuters, based on the iRail open data API. Each device represents a journey (departure station, arrival station, time window, active days): the plugin lists today's and tomorrow's trains, then checks every minute, during the watched window, for delays, cancellations, platform changes and network disturbances. The exposed info commands (next train delay, countdown, platform, disrupted journey) trigger your scenarios, and a Jeedom action command can be called automatically as soon as a delay exceeds the chosen threshold."
