@@ -34,6 +34,8 @@ Plugins → Organisation → SNCB/NMBS → **Ajouter un trajet**. La page du tra
 quatre onglets : Équipement, Trains, Réseau et Commandes. Toute la configuration
 tient dans le premier.
 
+![Configuration d'un trajet](../images/configuration-trajet.png)
+
 Bloc **Trajet** :
 
 | Champ | Valeur |
@@ -91,6 +93,10 @@ Les trois autres onglets ne se configurent pas :
   trajet ou non, avec un bouton Actualiser. Celles qui citent une de vos deux
   gares sont reprises dans l'onglet Trains.
 - **Commandes** est le tableau habituel des commandes de l'équipement.
+
+![Onglet Trains](../images/onglet-trains.png)
+
+![Onglet Réseau](../images/onglet-reseau.png)
 
 ## Le créneau et les jours
 
@@ -328,6 +334,9 @@ rouge et dit `SUPPRIMÉ` quand le train ne partira pas. L'heure est alors barré
 et le pictogramme prend la même couleur : la tuile reste lisible en noir et
 blanc, ou pour qui ne distingue pas le rouge. Quand il n'y a rien à afficher, la
 tuile reprend la phrase telle quelle : `Aucun train dans le créneau`.
+
+![Tuile Prochain train](../images/widget-soignies-bruxelles.png)
+![Tuile Prochain train](../images/widget-braine-soignies.png)
 
 Trois réglages facultatifs, dans la configuration de la commande, onglet
 Affichage, bloc « Paramètres optionnels widget » :

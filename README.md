@@ -13,6 +13,10 @@ d'en abuser.
 
 Plugin non officiel, sans lien avec la SNCB/NMBS.
 
+![Tuile Prochain train](docs/images/widget-soignies-bruxelles.png)
+
+![Onglet Trains](docs/images/onglet-trains.png)
+
 ## Ce que le plugin expose
 
 - le prochain train du créneau : heure théorique, heure réelle, retard, quai,

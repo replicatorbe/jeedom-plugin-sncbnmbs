@@ -32,6 +32,8 @@ Plugins → Organization → SNCB/NMBS → **Add a journey**. The journey page h
 tabs: Device, Trains, Network and Commands. The whole configuration fits in the
 first one.
 
+![Journey configuration](../images/configuration-trajet.png)
+
 **Journey** block:
 
 | Field | Value |
@@ -87,6 +89,10 @@ The three other tabs hold no setting:
   journey or not, with a Refresh button. Those naming one of your two stations
   are repeated in the Trains tab.
 - **Commands** is the usual command table of the device.
+
+![Trains tab](../images/onglet-trains.png)
+
+![Network tab](../images/onglet-reseau.png)
 
 ## The time window and the days
 
@@ -314,6 +320,9 @@ not run at all. The time is then struck through and the pictogram takes the same
 colour: the tile stays readable in black and white, or for someone who cannot
 tell red apart. When there is nothing to show, the tile repeats the sentence as
 it is: `No train in the time window`.
+
+![Next train tile](../images/widget-soignies-bruxelles.png)
+![Next train tile](../images/widget-braine-soignies.png)
 
 Three optional settings, in the command configuration, Display tab, "Optional
 widget parameters" block:
