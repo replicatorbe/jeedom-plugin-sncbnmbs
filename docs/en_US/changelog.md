@@ -1,5 +1,31 @@
 # SNCB/NMBS plugin changelog
 
+## 1.3
+
+**Fixes**
+
+- On a very busy line (Bruxelles-Central → Bruxelles-Nord, for instance), the
+  plugin showed "No train in the time window" in the middle of rush hour: iRail
+  only returns six trains per request, and the six from the half-hour look-back
+  had all left. The plugin now reads the following pages, four at most, until
+  it finds trains that can still be caught.
+- Calls to iRail are spaced at least 0.35 seconds apart, to stay under the limit
+  of three requests per second even with several journeys.
+- A journey whose departure and arrival stations are the same is reported in
+  the message centre as soon as it is saved. It used to be ignored silently.
+
+**Documentation**
+
+- Installation from the Market, and a clear notice: unofficial plugin, not
+  affiliated with SNCB/NMBS.
+- Fixed several passages that no longer matched the plugin: the fallback train,
+  the number of commands, the counters limited to the next train's window, the
+  green tick on the tile, the red threshold following the journey's threshold,
+  network disturbances not lighting up "Journey disrupted".
+- Two behaviours now explained: connections are not checked, and a train
+  cancelled for tomorrow is reported the evening before.
+- Interface labels aligned with the English translation.
+
 ## 1.2
 
 **Leaving on time**

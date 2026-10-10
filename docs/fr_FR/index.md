@@ -8,10 +8,14 @@ surveillé — retard, suppression, changement de voie, perturbation du réseau 
 expose le tout en commandes Jeedom.
 
 Il ne remplace pas un planificateur d'itinéraire. Il ne cherche pas le meilleur
-chemin, ne réserve rien, n'achète pas de billet et ne vous propose pas
-d'alternative quand votre train est supprimé. Il répond à une seule question,
-celle qu'on se pose la tasse de café à la main : est-ce que je pars maintenant,
-et sur quelle voie ?
+chemin, ne réserve rien et n'achète pas de billet. Quand votre train est
+supprimé, il vous indique simplement le suivant sur le même trajet. Il répond à
+une seule question, celle qu'on se pose la tasse de café à la main : est-ce que
+je pars maintenant, et sur quelle voie ?
+
+> Ce plugin n'est pas un produit officiel de la SNCB/NMBS et n'a aucun lien avec
+> elle. Il lit les données publiques republiées par iRail, une association
+> indépendante.
 
 Aucune dépendance, aucun démon, aucune clé d'API. Le cron du coeur passe chaque
 minute ; chaque trajet décide seul s'il interroge iRail ou s'il se contente de
@@ -19,11 +23,10 @@ recalculer ses commandes.
 
 ## Installation
 
-1. Plugins → Gestion des plugins → Ajouter → Github.
-2. Renseignez le dépôt (voir le README), branche `master`.
-3. Activez le plugin.
+1. Plugins → Gestion des plugins → Market, cherchez « SNCB ».
+2. Installez le plugin, puis activez-le.
 
-Aucune dépendance n'est à installer.
+Aucune dépendance à installer, aucun compte à créer. Jeedom 4.4 au minimum.
 
 ## Créer un trajet
 
@@ -69,7 +72,9 @@ et **Acquitter l'alerte**. Le résultat s'affiche juste en dessous.
 
 > Une gare de départ identique à la gare d'arrivée n'est pas seulement absurde :
 > iRail part en timeout et répond au bout de trente secondes. Le plugin refuse
-> donc ce trajet avant tout appel, et le signale au centre de messages.
+> donc ce trajet avant tout appel, et le signale au centre de messages dès
+> l'enregistrement. Un trajet dont une gare manque n'interroge rien non plus :
+> **Rafraîchir maintenant** affiche alors « Trajet incomplet ».
 
 Un trajet représente **un sens de circulation**. Le retour se crée en second
 équipement : dupliquez le trajet du matin, cliquez sur **Inverser le trajet**,
@@ -106,8 +111,10 @@ tout seul sur le suivant — il n'y a plus rien à surveiller aujourd'hui. Les
 trains du lendemain ne sont relus que toutes les trente minutes : un horaire de
 demain matin ne bouge pas à la minute, et chaque lecture coûte un appel.
 
-> « Demain » veut dire le prochain jour actif, pas le lendemain du calendrier.
-> Un trajet coché du lundi au vendredi affiche le lundi dès le vendredi soir.
+> Le créneau suivant est celui du prochain jour **actif**, pas forcément du
+> lendemain. Un trajet coché du lundi au vendredi affiche les trains du lundi
+> dès le vendredi soir. Dans l'onglet Trains, la colonne du jour dit
+> « Aujourd'hui », « Demain », ou la date (`13/10`) pour un jour plus lointain.
 
 Un créneau dont l'heure de fin précède l'heure de début est compris comme un
 créneau de nuit : `22:00` → `01:00` se termine le lendemain matin, et reste suivi
@@ -196,13 +203,18 @@ Trois situations, et trois seulement, comptent pour un problème :
 - un changement de voie, quand iRail signale que la voie n'est pas l'habituelle.
 
 Les alertes iRail rattachées aux trains et les perturbations du réseau
-**n'appellent jamais cette commande**. Elles alimentent la commande « Message de
-perturbation » et peuvent allumer « Trajet perturbé », rien de plus : ce sont des
-textes libres, souvent des travaux ou des informations commerciales, qu'on lit
-mais qui ne justifient pas de réveiller quelqu'un.
+**n'appellent jamais cette commande**. Toutes deux alimentent la commande
+« Message de perturbation ». Une alerte rattachée à un train allume aussi
+« Trajet perturbé » ; une perturbation du réseau, jamais. Ce sont des textes
+libres, souvent des travaux ou des informations commerciales, qu'on lit mais qui
+ne justifient pas de réveiller quelqu'un.
 
 Un train déjà parti n'est plus signalé : continuer à alerter dessus ne ferait que
 retarder l'alerte sur le suivant.
+
+Les trains du créneau suivant sont surveillés eux aussi. Un train de demain
+matin supprimé dès la veille vous est donc signalé le soir même, ce qui laisse
+le temps de s'organiser.
 
 **Une même situation n'est signalée qu'une fois.** Sans cette mémoire, un train
 retardé de vingt minutes enverrait vingt notifications, une par passage du cron.
@@ -244,7 +256,7 @@ n'est ni supprimé ni déjà parti. Deux limites à connaître :
 
 ## Commandes disponibles
 
-Vingt-sept commandes, dont quatre visibles par défaut — trois tuiles et un
+Vingt-huit commandes, dont quatre visibles par défaut — trois tuiles et un
 bouton.
 
 | Commande | Type | Description |
@@ -288,14 +300,17 @@ Quelques précisions qui évitent des scénarios faux :
 - « Départ dans » ne descend jamais sous `0` tant qu'un train est connu, et vaut
   `-1` quand il n'y en a aucun. Testez sur `>= 0` avant de comparer à une durée ;
 - « Trains du créneau », « Trains en retard », « Trains supprimés » et « Retard
-  maximum » portent sur **les deux créneaux connus** : celui d'aujourd'hui et
-  celui du prochain jour actif. Un train de demain matin annoncé à +30 gonfle
-  donc ces compteurs ce soir, et allume « Trajet perturbé » alors que plus rien
-  ne circule. Pour ne parler que du train qui vous concerne, servez-vous des
-  commandes du prochain train ;
+  maximum » ne portent que sur **le créneau du prochain train**, et seulement
+  sur ses trains pas encore partis. Ce soir, ils décrivent donc le créneau de
+  demain matin, et rien d'autre ;
 - « Occupation » est très souvent vide. iRail la publie à partir des retours des
   voyageurs de l'application SNCB : la plupart des trains n'en ont aucun. Un
   scénario ne doit pas dépendre de cette valeur.
+- sur un trajet avec correspondance, le plugin surveille le **premier train**
+  (départ, retard, voie, suppression) et l'arrivée finale. Il ne contrôle pas
+  la correspondance elle-même : une correspondance manquée à cause d'un retard
+  n'est pas détectée. Pour un trajet qui en compte une, un équipement par
+  tronçon donne une surveillance complète.
 
 ## Sur le dashboard
 
@@ -308,7 +323,7 @@ une autre, rendez-la visible depuis l'onglet Commandes.
 La tuile « Prochain train » est un widget du plugin. Elle montre un pictogramme
 de train, le nom du train et son heure de départ en gros caractères, puis une
 étiquette de retard et une étiquette de voie. L'étiquette de retard est verte et
-dit « sans retard » quand tout va bien, orange et dit `+7 min` en cas de retard,
+affiche une coche `✓` quand tout va bien, orange et dit `+7 min` en cas de retard,
 rouge et dit `SUPPRIMÉ` quand le train ne partira pas. L'heure est alors barrée,
 et le pictogramme prend la même couleur : la tuile reste lisible en noir et
 blanc, ou pour qui ne distingue pas le rouge. Quand il n'y a rien à afficher, la
@@ -325,9 +340,10 @@ Affichage, bloc « Paramètres optionnels widget » :
 
 « Retard du prochain train » reçoit deux seuils d'alerte à la création de
 l'équipement : orange dès la première minute de retard, rouge à partir de votre
-seuil. La couleur de la tuile et la notification disent ainsi la même chose. Ces
-seuils ne sont posés qu'une fois : si vous les modifiez, le plugin ne les touche
-plus.
+seuil. La couleur de la tuile et la notification disent ainsi la même chose. Le
+seuil rouge suit le seuil de retard du trajet quand vous le changez. Si vous
+modifiez vous-même ces seuils dans la configuration de la commande, le plugin
+n'y touche plus.
 
 Les commandes binaires du plugin — « Trajet perturbé », « Changement de voie »,
 « Prochain train supprimé » — utilisent un widget qui montre un triangle rouge

@@ -136,6 +136,16 @@ class sncbnmbs extends eqLogic {
      * sur Namur → Bruxelles-Central, réponse identique à celle de 6.
      */
     const MAX_TRAINS = 6;
+
+    /*
+     * Pages de six trains lues au plus pour un créneau : assez pour franchir
+     * la demi-heure de recul sur l'axe le plus chargé du pays, et une borne
+     * ferme sur ce qu'un trajet coûte à iRail.
+     */
+    const MAX_PAGES = 4;
+
+    /* Écart minimal entre deux appels à iRail, en secondes (limite : 3/s). */
+    const MIN_CALL_GAP = 0.35;
     const MAX_WATCH_BEFORE = 240;
     const MAX_WALK_TIME = 120;
 
@@ -281,8 +291,8 @@ class sncbnmbs extends eqLogic {
         /*
          * Aucune exception ici : le coeur crée l'équipement avec son seul nom.
          * Toute validation rendrait le bouton « Ajouter » définitivement
-         * inopérant. Un trajet incomplet est signalé au centre de messages au
-         * moment du rafraîchissement.
+         * inopérant. Un trajet aux deux gares identiques est signalé au centre
+         * de messages par postSave().
          */
 
         /*
@@ -328,6 +338,15 @@ class sncbnmbs extends eqLogic {
         $this->createCommands();
 
         if (!$this->isConfigured()) {
+            /*
+             * Deux fois la même gare est une erreur de saisie : on la signale
+             * dès l'enregistrement, faute de quoi le cron ignore le trajet sans
+             * rien dire. Un trajet sans gare, lui, vient souvent juste d'être
+             * créé : le signaler ferait un message à chaque « Ajouter ».
+             */
+            if (trim($this->getConfiguration('from_id', '')) != '' && trim($this->getConfiguration('to_id', '')) != '') {
+                $this->reportProblem($this->configurationError());
+            }
             return;
         }
         try {
@@ -751,62 +770,109 @@ class sncbnmbs extends eqLogic {
          */
         $from = max($_slot['start'], min($now - self::LOOKBACK, $_slot['end']));
 
-        $params = array(
-            'from'    => $this->getConfiguration('from_id'),
-            'to'      => $this->getConfiguration('to_id'),
-            // DDMMYY : tout autre format est accepté sans erreur par iRail, qui
-            // retombe alors silencieusement sur aujourd'hui.
-            'date'    => date('dmy', $from),
-            'time'    => date('Hi', $from),
-            'timesel' => 'departure',
-            'alerts'  => 'true',
-            'results' => $this->maxTrains(),
-        );
-        $data = static::call('connections', $params);
-
+        /*
+         * iRail rend au plus six connexions par demande. Sur un axe chargé
+         * (Bruxelles-Central → Bruxelles-Nord, un train toutes les trois
+         * minutes), la demi-heure de recul en contient davantage : les six
+         * trains rendus étaient tous déjà partis, et le plugin annonçait
+         * « aucun train dans le créneau » en pleine heure de pointe — vérifié
+         * le 10/10/2026 à 13 h 38. On redemande donc à partir du dernier
+         * départ lu, tant que la page était pleine et que les trains encore
+         * prenables manquent. La borne de pages protège iRail d'une boucle.
+         */
         $trains = array();
-        $connections = isset($data['connection']) ? $data['connection'] : array();
-        if (is_array($connections) && isset($connections['id'])) {
-            // iRail rend un objet nu quand il n'y a qu'un seul résultat.
-            $connections = array($connections);
-        }
-        if (!is_array($connections)) {
-            // Réponse de forme inattendue : un foreach sur une chaîne lèverait
-            // un avertissement à chaque minute dans les journaux.
-            $connections = array();
-        }
         $vus = array();
-        foreach ($connections as $connection) {
-            $train = self::parseConnection($connection, $_slot['date']);
-            if ($train === null) {
-                continue;
+        $wanted = $this->maxTrains();
+        for ($page = 0; $page < self::MAX_PAGES; $page++) {
+            $params = array(
+                'from'    => $this->getConfiguration('from_id'),
+                'to'      => $this->getConfiguration('to_id'),
+                // DDMMYY : tout autre format est accepté sans erreur par iRail, qui
+                // retombe alors silencieusement sur aujourd'hui.
+                'date'    => date('dmy', $from),
+                'time'    => date('Hi', $from),
+                'timesel' => 'departure',
+                'alerts'  => 'true',
+                'results' => $wanted,
+            );
+            try {
+                $data = static::call('connections', $params);
+            } catch (Throwable $e) {
+                // La première page fait foi ; une suivante en échec laisse un
+                // créneau incomplet mais utilisable, repris la minute d'après.
+                if ($page === 0) {
+                    throw $e;
+                }
+                log::add(__CLASS__, 'debug', $this->getHumanName() . ' : ' . $e->getMessage());
+                break;
             }
-            /*
-             * iRail rend parfois deux fois le même départ, avec deux acheminements
-             * différents — observé sur Soignies → Bruxelles-Central, l'IC 3706 de
-             * 06:37 listé deux fois. La clé (train + heure de départ) est alors
-             * identique : sans ce filtre, le tableau affiche le train en double,
-             * « trains du créneau » le compte deux fois, et un acquittement porte
-             * sur les deux. On garde le trajet le plus court.
-             */
-            if (isset($vus[$train['key']])) {
-                $ancien = $vus[$train['key']];
-                if ($train['duration'] >= $trains[$ancien]['duration']) {
+
+            $connections = isset($data['connection']) ? $data['connection'] : array();
+            if (is_array($connections) && isset($connections['id'])) {
+                // iRail rend un objet nu quand il n'y a qu'un seul résultat.
+                $connections = array($connections);
+            }
+            if (!is_array($connections)) {
+                // Réponse de forme inattendue : un foreach sur une chaîne lèverait
+                // un avertissement à chaque minute dans les journaux.
+                $connections = array();
+            }
+            $lastDep = 0;
+            $added = 0;
+            foreach ($connections as $connection) {
+                $train = self::parseConnection($connection, $_slot['date']);
+                if ($train === null) {
                     continue;
                 }
-                $trains[$ancien] = $train;
-                continue;
+                $lastDep = max($lastDep, $train['depTs']);
+                /*
+                 * iRail rend parfois deux fois le même départ, avec deux acheminements
+                 * différents — observé sur Soignies → Bruxelles-Central, l'IC 3706 de
+                 * 06:37 listé deux fois. La clé (train + heure de départ) est alors
+                 * identique : sans ce filtre, le tableau affiche le train en double,
+                 * « trains du créneau » le compte deux fois, et un acquittement porte
+                 * sur les deux. On garde le trajet le plus court. Le même filtre
+                 * écarte le train relu en tête de la page suivante.
+                 */
+                if (isset($vus[$train['key']])) {
+                    $ancien = $vus[$train['key']];
+                    if ($train['duration'] >= $trains[$ancien]['duration']) {
+                        continue;
+                    }
+                    $trains[$ancien] = $train;
+                    continue;
+                }
+                /*
+                 * iRail rend les N connexions suivant l'heure demandée, sans borne
+                 * haute : sans ce filtre, un créneau de 7 h à 9 h remonterait aussi
+                 * le train de 11 h et déclencherait des alertes hors sujet.
+                 */
+                if ($train['depTs'] > $_slot['end'] || $train['depTs'] < $_slot['start']) {
+                    continue;
+                }
+                $vus[$train['key']] = count($trains);
+                $trains[] = $train;
+                $added++;
             }
-            /*
-             * iRail rend les N connexions suivant l'heure demandée, sans borne
-             * haute : sans ce filtre, un créneau de 7 h à 9 h remonterait aussi
-             * le train de 11 h et déclencherait des alertes hors sujet.
-             */
-            if ($train['depTs'] > $_slot['end'] || $train['depTs'] < $_slot['start']) {
-                continue;
+
+            // Page incomplète : iRail n'a rien de plus à proposer.
+            if (count($connections) < $wanted || $added === 0) {
+                break;
             }
-            $vus[$train['key']] = count($trains);
-            $trains[] = $train;
+            // Le créneau est entièrement lu.
+            if ($lastDep <= $from || $lastDep >= $_slot['end']) {
+                break;
+            }
+            $takeable = 0;
+            foreach ($trains as $train) {
+                if (!self::isGone($train, $now)) {
+                    $takeable++;
+                }
+            }
+            if ($takeable >= $wanted) {
+                break;
+            }
+            $from = $lastDep;
         }
         return $trains;
     }
@@ -1039,15 +1105,20 @@ class sncbnmbs extends eqLogic {
     private function nextTrain($_trains, $_now = null) {
         $now = ($_now === null) ? time() : $_now;
         foreach ($_trains as $train) {
-            if ($train['left']) {
-                continue;
-            }
-            if (($train['depTs'] + $train['depDelay']) < ($now - 60)) {
+            if (self::isGone($train, $now)) {
                 continue;
             }
             return $train;
         }
         return null;
+    }
+
+    /* Un train parti, ou dont le départ réel est passé depuis plus d'une minute. */
+    private static function isGone($_train, $_now) {
+        if ($_train['left']) {
+            return true;
+        }
+        return ($_train['depTs'] + $_train['depDelay']) < ($_now - 60);
     }
 
     /*
@@ -1756,6 +1827,18 @@ class sncbnmbs extends eqLogic {
     public static function call($_path, $_params = array()) {
         $params = array_merge(array('format' => 'json', 'lang' => self::language()), $_params);
         $url = self::API_BASE . '/' . ltrim($_path, '/') . '?' . http_build_query($params);
+
+        /*
+         * iRail tolère trois requêtes par seconde et par client. Un trajet
+         * chargé lit jusqu'à quatre pages d'affilée, et le cron enchaîne les
+         * trajets : on espace donc chaque appel du précédent.
+         */
+        static $lastCall = 0.0;
+        $wait = self::MIN_CALL_GAP - (microtime(true) - $lastCall);
+        if ($wait > 0) {
+            usleep((int) ($wait * 1000000));
+        }
+        $lastCall = microtime(true);
 
         $code = 0;
         $body = self::httpGet($url, $code);

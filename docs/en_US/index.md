@@ -6,10 +6,14 @@ window and the days of the week concerned. The plugin lists the trains of the
 window, then checks their state during the watched window — delay, cancellation,
 platform change, network disturbance — and exposes all of it as Jeedom commands.
 
-It is not a journey planner. It does not look for the best route, books nothing,
-buys no ticket and offers no alternative when your train is cancelled. It
-answers one question only, the one you ask with the coffee mug still in hand:
-do I leave now, and from which platform?
+It is not a journey planner. It does not look for the best route, books nothing
+and buys no ticket. When your train is cancelled, it simply tells you the next
+one on the same journey. It answers one question only, the one you ask with the
+coffee mug still in hand: do I leave now, and from which platform?
+
+> This plugin is not an official SNCB/NMBS product and has no link with the
+> company. It reads the public data republished by iRail, an independent
+> non-profit.
 
 No dependency, no daemon, no API key. The core cron runs every minute; each
 journey decides on its own whether to query iRail or simply recompute its
@@ -17,11 +21,10 @@ commands.
 
 ## Installation
 
-1. Plugins → Plugin management → Add → Github.
-2. Fill in the repository (see the README), branch `master`.
-3. Enable the plugin.
+1. Plugins → Plugin management → Market, search for "SNCB".
+2. Install the plugin, then enable it.
 
-Nothing else has to be installed.
+No dependency to install, no account to create. Jeedom 4.4 or later.
 
 ## Creating a journey
 
@@ -35,8 +38,8 @@ first one.
 |---|---|
 | Departure station | type at least two letters, click the magnifier, pick it from the drop-down list |
 | Arrival station | same |
-| Swap the journey | exchanges both stations |
-| Selected journey | shows, in plain words, the two stations as they will be saved |
+| Reverse the journey | exchanges both stations |
+| Journey selected | shows, in plain words, the two stations as they will be saved |
 
 The search ignores accents and hyphens: `bruxelles midi` finds
 "Bruxelles-Midi". Both stations must be **picked from the list**, not merely
@@ -47,14 +50,14 @@ typed: the plugin works with iRail identifiers, not with names.
 | Field | Value |
 |---|---|
 | Start time, End | the hours between which you usually take the train. `07:00` → `09:00` by default |
-| Days | the Mo to Su boxes |
+| Days | the Mon to Sun boxes |
 
-**Watching** block:
+**Monitoring** block:
 
 | Field | Value |
 |---|---|
 | Delay threshold | from how many minutes a train counts as "delayed". 5 by default |
-| Minute-by-minute watching | unticked, the journey is only read again every quarter of an hour during the window and its lead time, once an hour outside |
+| Minute-by-minute monitoring | unticked, the journey is only read again every quarter of an hour during the window and its lead time, once an hour outside |
 | Minutes ahead | how many minutes before the window the minute-by-minute watch starts. 60 by default, 240 at most |
 | Time to the station | minutes needed to reach the departure station, from 0 to 120. Used to compute "Leave in". 0 by default |
 | Number of trains | how many departures to follow per window, from 1 to 6. 6 by default |
@@ -62,14 +65,16 @@ typed: the plugin works with iRail identifiers, not with names.
 
 Two buttons complete that block: **Refresh now**, which queries iRail without
 waiting for the cron — pointless right after a save, which already does it — and
-**Acknowledge alert**. The result appears just below.
+**Acknowledge the alert**. The result appears just below.
 
 > A departure station identical to the arrival station is not only absurd: iRail
 > times out and answers after thirty seconds. The plugin therefore rejects such
-> a journey before any call, and says so in the message centre.
+> a journey before any call, and reports it in the message centre as soon as it
+> is saved. A journey missing a station queries nothing either: **Refresh now**
+> then shows "Incomplete journey".
 
 A journey stands for **one direction of travel**. The way back is a second
-device: duplicate the morning journey, click **Swap the journey**, shift the time
+device: duplicate the morning journey, click **Reverse the journey**, shift the time
 window. Nothing forces the two directions to share a threshold or a set of days.
 
 The three other tabs hold no setting:
@@ -101,8 +106,10 @@ itself — there is nothing left to watch today. Tomorrow's trains are only read
 again every thirty minutes: a timetable for tomorrow morning does not change by
 the minute, and every read costs a call.
 
-> "Tomorrow" means the next active day, not the next day on the calendar. A
-> journey ticked Monday to Friday shows Monday from Friday evening on.
+> The following window is the one of the next **active** day, not necessarily
+> tomorrow. A journey ticked Monday to Friday shows Monday's trains from Friday
+> evening on. In the Trains tab, the day column reads "Today", "Tomorrow", or
+> the date (`13/10`) for a later day.
 
 A window whose end time comes before its start time is understood as a night
 window: `22:00` → `01:00` ends the following morning, and is still followed after
@@ -141,7 +148,7 @@ plugin therefore sets its own bounds:
 - network disturbances are shared between all journeys and read again every
   ten minutes, only while watching, whatever the number of devices.
 
-The "Minute-by-minute watching" box spaces that watch out without deleting the
+The "Minute-by-minute monitoring" box spaces that watch out without deleting the
 journey: during the window and its lead time, the journey is only read again
 **every quarter of an hour** — night included for a night window —, and once an
 hour outside. Alerts are still sent, up to fifteen minutes late; the timetable
@@ -168,7 +175,7 @@ log.
 ## Acting on a delay
 
 Every info command triggers your scenarios on event. But the plugin can also act
-on its own: the **command to trigger**, chosen in the Watching block, is an
+on its own: the **command to trigger**, chosen in the Monitoring block, is an
 action command of your choosing — a notification, a spoken message, a lamp —
 called as soon as a problem is found on a train that has not left yet.
 
@@ -186,12 +193,17 @@ Three situations, and only three, count as a problem:
 - a platform change, when iRail reports the platform is not the usual one.
 
 The iRail alerts attached to trains and the network disturbances **never call
-that command**. They feed the "Disturbance message" command and may light up
-"Journey disrupted", nothing more: they are free text, often works or commercial
-notices, worth reading but not worth waking anyone up for.
+that command**. Both feed the "Disruption message" command. An alert attached to
+a train also lights up "Journey disrupted"; a network disturbance never does.
+They are free text, often works or commercial notices, worth reading but not
+worth waking anyone up for.
 
 A train that has already left is no longer reported: keeping on alerting about it
 would only delay the alert about the next one.
+
+The trains of the following window are watched too. A train for tomorrow
+morning cancelled the day before is therefore reported that same evening, which
+leaves time to make other plans.
 
 **The same situation is only reported once.** Without that memory, a train
 delayed by twenty minutes would send twenty notifications, one per cron pass.
@@ -199,7 +211,7 @@ One exception: a delay growing by a ten-minute band is reported again. A train
 announced at +5 and then at +25 deserves a second alert, because you may already
 have decided to leave on the strength of the first one.
 
-The **Acknowledge alert** action command, and the button of the same name on the
+The **Acknowledge the alert** action command, and the button of the same name on the
 journey page, remember **the trains currently in trouble**. Those no longer
 trigger anything, even if their delay grows worse, even if they turn into
 cancellations. Acknowledging says "I have seen that delay", not "stop
@@ -232,12 +244,12 @@ neither cancelled nor already gone. Two limits worth knowing:
 
 ## Available commands
 
-Twenty-seven commands, four of them visible by default — three tiles and a
+Twenty-eight commands, four of them visible by default — three tiles and a
 button.
 
 | Command | Type | Description |
 |---|---|---|
-| Next train (`summary`) | info / string | the summary line: `IC 2137 · 07:42 · +5 min · platform 3`, or `No train in the window` |
+| Next train (`summary`) | info / string | the summary line: `IC 2137 · 07:42 · +5 min · platform 3`, or `No train in the time window` |
 | Next train delay (`next_delay`) | info / numeric, min | historised. `0` when the train is on time |
 | Journey disrupted (`disturbed`) | info / binary | `1` as soon as a train of the current window that has not left yet is cancelled, an alert is attached to the next train, its platform changes, or a delay reaches the threshold |
 | Scheduled departure (`next_time`) | info / string | the timetable time, `HH:MM` |
@@ -251,20 +263,20 @@ button.
 | Next train cancelled (`next_canceled`) | info / binary | cancellation at departure or at arrival |
 | Actual arrival (`next_arrival`) | info / string | the arrival time, arrival delay included |
 | Journey duration (`next_duration`) | info / numeric, min | |
-| Transfers (`next_transfers`) | info / numeric | `0` for a direct train |
+| Connections (`next_transfers`) | info / numeric | `0` for a direct train |
 | Occupancy (`next_occupancy`) | info / string | `Low`, `Medium`, `High`, or empty |
 | Fallback train (`next2_summary`) | info / string | the same summary line, for the train after |
 | Fallback departure (`next2_time`) | info / string | its timetable time, `HH:MM` |
 | Fallback train (number) (`next2_vehicle`) | info / string | `P 7800`, `IC 3706`… |
 | Fallback in (`next2_countdown`) | info / numeric, min | minutes before its actual departure. `-1` when there is no fallback |
-| Trains in the window (`trains_count`) | info / numeric | number of trains of the next train's window that have not left yet. Trains already gone and those of the following window are not counted, nor in the next three commands; `0` when no train is expected any more |
+| Trains in the time window (`trains_count`) | info / numeric | number of trains of the next train's window that have not left yet. Trains already gone and those of the following window are not counted, nor in the next three commands; `0` when no train is expected any more |
 | Delayed trains (`trains_delayed`) | info / numeric | historised. Any delay, even of one minute |
 | Cancelled trains (`trains_canceled`) | info / numeric | historised |
 | Maximum delay (`delay_max`) | info / numeric, min | the worst delay among the window's trains that have not left yet |
-| Disturbance message (`alert_message`) | info / string | the iRail alerts of the window's trains that have not left yet and the network disturbances, at most three, separated by dashes |
+| Disruption message (`alert_message`) | info / string | the iRail alerts of the window's trains that have not left yet and the network disturbances, at most three, separated by dashes |
 | Last check (`last_update`) | info / string | the time of the last **successful** read, `DD/MM/YYYY HH:MM` |
 | Refresh (`refresh`) | action | forces a read from iRail, no more than once every 20 seconds |
-| Acknowledge alert (`acknowledge`) | action | silences the alerts of the trains currently in trouble; the others stay watched |
+| Acknowledge the alert (`acknowledge`) | action | silences the alerts of the trains currently in trouble; the others stay watched |
 
 A few details that keep scenarios honest:
 
@@ -275,15 +287,17 @@ A few details that keep scenarios honest:
   next one;
 - "Departure in" never drops below `0` as long as a train is known, and is `-1`
   when there is none. Test on `>= 0` before comparing it to a duration;
-- "Trains in the window", "Delayed trains", "Cancelled trains" and "Maximum
-  delay" cover **both known windows**: today's and the one of the next active
-  day. A train announced at +30 for tomorrow morning therefore inflates those
-  counters tonight, and lights up "Journey disrupted" while nothing is running
-  any more. To speak only of the train that concerns you, use the next train
-  commands;
+- "Trains in the time window", "Delayed trains", "Cancelled trains" and
+  "Maximum delay" only cover **the next train's window**, and only its trains
+  that have not left yet. Tonight, they therefore describe tomorrow morning's
+  window and nothing else;
 - "Occupancy" is very often empty. iRail publishes it from the feedback of
   travellers using the SNCB app: most trains get none. A scenario must not depend
-  on that value.
+  on that value;
+- on a journey with a connection, the plugin watches the **first train**
+  (departure, delay, platform, cancellation) and the final arrival. It does not
+  check the connection itself: a connection missed because of a delay is not
+  detected. For a journey with one, one device per leg gives complete watching.
 
 ## On the dashboard
 
@@ -294,12 +308,12 @@ a single journey. To display another one, make it visible from the Commands tab.
 
 The "Next train" tile is a plugin widget. It shows a train pictogram, the train
 name and its departure time in large type, then a delay label and a platform
-label. The delay label is green and reads "no delay" when all is well, orange
+label. The delay label is green and shows a tick `✓` when all is well, orange
 and reads `+7 min` when the train is late, red and reads `CANCELLED` when it will
 not run at all. The time is then struck through and the pictogram takes the same
 colour: the tile stays readable in black and white, or for someone who cannot
 tell red apart. When there is nothing to show, the tile repeats the sentence as
-it is: `No train in the window`.
+it is: `No train in the time window`.
 
 Three optional settings, in the command configuration, Display tab, "Optional
 widget parameters" block:
@@ -312,8 +326,9 @@ widget parameters" block:
 
 "Next train delay" gets two alert thresholds when the device is created: orange
 from the first minute of delay, red from your own threshold on. The colour of the
-tile and the notification then say the same thing. Those thresholds are only set
-once: if you change them, the plugin never touches them again.
+tile and the notification then say the same thing. The red threshold follows the
+journey's delay threshold when you change it. If you edit those thresholds
+yourself in the command configuration, the plugin no longer touches them.
 
 The plugin's binary commands — "Journey disrupted", "Platform change", "Next
 train cancelled" — use a widget showing a red triangle when true, a green tick
@@ -433,8 +448,8 @@ Logs are under Analysis → Logs, log `sncbnmbs`.
 | "The departure station and the arrival station are the same" | twice the same station; iRail only answers with a timeout, the plugin refuses before the call |
 | "No journey found: check the stations and the time window" | iRail does not know that connection, or no train runs at that time |
 | "iRail is not answering" | outage, network cut or too short a timeout; the plugin retries on the next pass |
-| "iRail refused the request: HTTP ..." | service error; the known timetable stays displayed |
-| "No train in the window" | today's window is already over and no active day is near, or it is too narrow to hold a train |
+| "iRail rejected the request: HTTP ..." | service error; the known timetable stays displayed |
+| "No train in the time window" | today's window is already over and no active day is near, or it is too narrow to hold a train |
 | The window only returns one or two trains | the requested number of trains is low, or the upper bound of the window cuts off the following ones |
 | "Occupancy" always empty | normal: iRail only publishes occupancy for trains commented on by travellers |
 | A disturbance unrelated to your line | matching is done on station names; see the warning above |

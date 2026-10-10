@@ -1,5 +1,31 @@
 # Changelog du plugin SNCB/NMBS
 
+## 1.3
+
+**Corrections**
+
+- Sur un axe très fréquenté (Bruxelles-Central → Bruxelles-Nord, par exemple),
+  le plugin annonçait « Aucun train dans le créneau » en pleine heure de
+  pointe : iRail ne rend que six trains par demande, et les six de la
+  demi-heure de recul étaient déjà partis. Le plugin lit désormais les pages
+  suivantes, quatre au plus, jusqu'à trouver les trains encore à prendre.
+- Les appels à iRail sont espacés d'au moins 0,35 seconde, pour rester sous la
+  limite de trois requêtes par seconde même avec plusieurs trajets.
+- Un trajet dont la gare de départ et la gare d'arrivée sont identiques est
+  signalé au centre de messages dès l'enregistrement. Avant, il était ignoré
+  sans rien dire.
+
+**Documentation**
+
+- Installation depuis le Market, et mention claire : plugin non officiel, sans
+  lien avec la SNCB/NMBS.
+- Corrigé plusieurs passages qui ne correspondaient plus au plugin : le train de
+  repli, le nombre de commandes, les compteurs limités au créneau du prochain
+  train, la coche verte de la tuile, le seuil rouge qui suit celui du trajet,
+  les perturbations du réseau qui n'allument pas « Trajet perturbé ».
+- Deux comportements désormais expliqués : les correspondances ne sont pas
+  contrôlées, et un train du lendemain supprimé est signalé dès la veille.
+
 ## 1.2
 
 **Partir à temps**
