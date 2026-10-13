@@ -138,6 +138,95 @@ trajetRejoue::$pages = array(array(connexion($h('1310'), false, 'IC2137', 900), 
 list($trains, $prochain) = lire($creneau, $h('1320'));
 check('le 13:10 à +15 est le prochain', $prochain['vehicle'], 'IC2137');
 
+echo "Une réponse sans liste de connexions est une panne, pas « aucun train »\n";
+class trajetBrut extends sncbnmbs {
+    public static $reponse = array();
+    public static function call($_path, $_params = array()) { return self::$reponse; }
+}
+foreach (array('{}' => array(), 'sans connection' => array('version' => '1.3', 'timestamp' => '1')) as $nom => $reponse) {
+    trajetBrut::$reponse = $reponse;
+    $trajet = new trajetBrut();
+    $fetch = new ReflectionMethod('sncbnmbs', 'fetchSlot');
+    $fetch->setAccessible(true);
+    try {
+        $fetch->invoke($trajet, $creneau, $h('1322'));
+        check("réponse $nom : panne passagère levée", false, true);
+    } catch (sncbnmbsTransientException $e) {
+        check("réponse $nom : panne passagère levée", true, true);
+    }
+}
+trajetBrut::$reponse = array('version' => '1.3', 'connection' => array());
+check('une liste vide reste « aucun train »', $fetch->invoke(new trajetBrut(), $creneau, $h('1322')), array());
+
+/* Pose l'échéance du cron comme le ferait cron(), sans passer par la base. */
+function echeance($_value) {
+    $p = new ReflectionProperty('sncbnmbs', '_deadline');
+    $p->setAccessible(true);
+    $p->setValue(null, $_value);
+}
+
+echo "Budget du cron épuisé : la première page seulement\n";
+echeance(microtime(true) - 1);
+trajetRejoue::$demandes = array();
+trajetRejoue::$pages = array(
+    array(connexion($h('1307'), true), connexion($h('1310'), true), connexion($h('1313'), true),
+          connexion($h('1316'), true), connexion($h('1320'), true), connexion($h('1323'), true)),
+    array(connexion($h('1326')), connexion($h('1329')), connexion($h('1332')),
+          connexion($h('1335')), connexion($h('1338')), connexion($h('1341'))),
+);
+lire($creneau, $h('1322'));
+check('une seule demande', count(trajetRejoue::$demandes), 1);
+echeance(null);
+trajetRejoue::$pages = array();
+
+echo "Recul en surveillance : relu à deux minutes, même si le cron passe en avance\n";
+$trajet = new sncbnmbs();
+$trajet->setConfiguration('from_id', 'BE.NMBS.008813003');
+$trajet->setConfiguration('to_id', 'BE.NMBS.008812005');
+$trajet->setConfiguration('slot_start', '12:00');
+$trajet->setConfiguration('slot_end', '15:00');
+$trajet->setConfiguration('day_' . date('N', $jour), 1);
+cache::$values = array();
+$echec = $h('1300') + 5; // l'appel raté a démarré à 13:00:05
+cache::set('sncbnmbs::journeys::1', array('fetchedAt' => $h('1255')));
+cache::set('sncbnmbs::backoff::1', array('fails' => 3, 'at' => $echec, 'wait' => 240));
+check('en surveillance', $trajet->isWatching($echec), true);
+check('pas avant la fin du recul', $trajet->shouldPoll($echec + 60), false);
+check('relu au passage de 13:02:03', $trajet->shouldPoll($h('1302') + 3), true);
+cache::set('sncbnmbs::backoff::1', array('fails' => 3, 'at' => $echec, 'wait' => 240));
+$trajet->setConfiguration('watch_enabled', 0);
+check('sans surveillance, le recul complet reste dû', $trajet->shouldPoll($echec + 200), false);
+cache::$values = array();
+
+echo "Cron : le trajet le moins récemment lu passe d'abord, le budget est tenu\n";
+class trajetCron extends sncbnmbs {
+    public static $journal = array();
+    public static $epuise = false;
+    public $nom;
+    public $lu;
+    public function __construct($_nom, $_lu) { $this->nom = $_nom; $this->lu = $_lu; }
+    public function fetchedAt() { return $this->lu; }
+    public function shouldPoll($_now = null) { return true; }
+    public function update($_force = false) {
+        self::$journal[] = 'lu ' . $this->nom;
+        // Un iRail lent : le premier trajet consomme tout le budget.
+        if (self::$epuise) { echeance(microtime(true) - 1); }
+        return array();
+    }
+    public function refreshFromCache() { self::$journal[] = 'cache ' . $this->nom; }
+}
+$passe = new ReflectionMethod('sncbnmbs', 'cronPass');
+$passe->setAccessible(true);
+echeance(microtime(true) + 45);
+trajetCron::$epuise = true;
+$passe->invoke(null, array(new trajetCron('Braine', $h('1300')), new trajetCron('Soignies', $h('1250'))));
+check('le plus ancien est relu, l\'autre attend', implode(', ', trajetCron::$journal), 'lu Soignies, cache Braine');
+trajetCron::$journal = array();
+echeance(microtime(true) + 45);
+$passe->invoke(null, array(new trajetCron('Braine', $h('1300')), new trajetCron('Soignies', $h('1303'))));
+check('à la minute suivante, c\'est l\'autre', implode(', ', trajetCron::$journal), 'lu Braine, cache Soignies');
+echeance(null);
+
 if ($live) {
     echo "Essai réel : Bruxelles-Central → Bruxelles-Nord, maintenant\n";
     $now = time();

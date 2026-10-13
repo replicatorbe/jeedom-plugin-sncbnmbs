@@ -37,6 +37,17 @@ class eqLogic {
     }
 }
 
+/* Un cache en mémoire, le temps d'un essai : le recul et les trajets lus y vivent. */
+class cache {
+    public static $values = array();
+    private $key;
+    public function __construct($_key) { $this->key = $_key; }
+    public static function byKey($_key) { return new cache($_key); }
+    public static function set($_key, $_value, $_lifetime = 0) { self::$values[$_key] = $_value; }
+    public function getValue() { return isset(self::$values[$this->key]) ? self::$values[$this->key] : null; }
+    public function remove() { unset(self::$values[$this->key]); }
+}
+
 /* Le fichier déclare aussi sa classe de commandes. */
 class cmd {
 }

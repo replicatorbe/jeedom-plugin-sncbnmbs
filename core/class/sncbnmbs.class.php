@@ -98,6 +98,15 @@ class sncbnmbs extends eqLogic {
      */
     const BACKOFF_WATCHING_MAX = 120;
 
+    /*
+     * Marge sur l'échéance du recul. L'instant mémorisé est le début de l'appel
+     * raté, et le cron ne repasse pas à la seconde près : un passage tombé deux
+     * secondes plus tôt dans la minute sautait son tour, et l'attente de deux
+     * minutes en devenait trois — relevé le 12/10/2026, 06:55:05 → 06:58:03.
+     * Même marge que pour la lecture à la minute (55 s pour 60).
+     */
+    const BACKOFF_SLACK = 5;
+
     /* Échecs passagers consécutifs tolérés avant d'alerter le centre de messages. */
     const TRANSIENT_REPORT_AFTER = 3;
 
@@ -112,6 +121,9 @@ class sncbnmbs extends eqLogic {
      * le cache et leur appel réseau attend la minute suivante.
      */
     const CRON_BUDGET = 45;
+
+    /* Échéance du passage du cron en cours, null hors du cron. */
+    private static $_deadline = null;
 
     /*
      * En plein créneau, on demande les trains à partir d'une demi-heure en
@@ -197,11 +209,28 @@ class sncbnmbs extends eqLogic {
      * de 7 h du matin ferait 1440 requêtes par jour pour en utiliser 120.
      */
     public static function cron() {
-        $deadline = microtime(true) + self::CRON_BUDGET;
+        self::$_deadline = microtime(true) + self::CRON_BUDGET;
+        try {
+            self::cronPass(self::byType(__CLASS__, true));
+        } finally {
+            self::$_deadline = null;
+        }
+    }
 
-        foreach (self::byType(__CLASS__, true) as $eqLogic) {
+    private static function cronPass($_eqLogics) {
+        /*
+         * Le trajet le moins récemment lu passe en premier. Dans l'ordre fixe de
+         * la base, un iRail lent mais vivant laissait le premier trajet épuiser
+         * le budget à chaque minute, et le second n'était plus jamais relu —
+         * sans erreur, sans message : seul l'écran le voyait vieillir.
+         */
+        usort($_eqLogics, function ($_a, $_b) {
+            return $_a->fetchedAt() - $_b->fetchedAt();
+        });
+
+        foreach ($_eqLogics as $eqLogic) {
             try {
-                if (!$eqLogic->shouldPoll() || microtime(true) > $deadline) {
+                if (!$eqLogic->shouldPoll() || self::pastDeadline()) {
                     /*
                      * Même sans nouvel appel, les commandes sont recomposées :
                      * le compte à rebours et « prochain train » changent à
@@ -216,6 +245,11 @@ class sncbnmbs extends eqLogic {
                 log::add(__CLASS__, 'error', $eqLogic->getHumanName() . ' : ' . $e->getMessage());
             }
         }
+    }
+
+    /* Le budget du passage en cours est-il épuisé ? Jamais hors du cron. */
+    private static function pastDeadline() {
+        return self::$_deadline !== null && microtime(true) > self::$_deadline;
     }
 
     /* Faut-il interroger iRail pour ce trajet, maintenant ? */
@@ -235,7 +269,7 @@ class sncbnmbs extends eqLogic {
                 // Le recul ne doit pas espacer les lectures plus que la cadence normale.
                 $attente = min($attente, self::SLOT_INTERVAL);
             }
-            if ($now < ($backoff['at'] + $attente)) {
+            if ($now < ($backoff['at'] + $attente - self::BACKOFF_SLACK)) {
                 return false;
             }
         }
@@ -715,7 +749,12 @@ class sncbnmbs extends eqLogic {
             $ttl = (($slot['start'] - $now) > 21600) ? 10800 : self::TOMORROW_TTL;
             $stale = ($_force || $live || $age >= $ttl);
 
-            if (!$stale) {
+            /*
+             * Budget du cron épuisé : seul le créneau le plus proche est encore
+             * relu, les autres gardent ce qu'on en sait jusqu'à la minute
+             * suivante.
+             */
+            if (!$stale || (!$nearest && self::pastDeadline())) {
                 // Réutiliser tels quels les trains déjà connus pour cette date.
                 foreach ($previousTrains as $train) {
                     if (isset($train['date']) && $train['date'] === $date) {
@@ -784,6 +823,10 @@ class sncbnmbs extends eqLogic {
         $vus = array();
         $wanted = $this->maxTrains();
         for ($page = 0; $page < self::MAX_PAGES; $page++) {
+            // Budget du cron épuisé : la première page suffit, la suite attend.
+            if ($page > 0 && self::pastDeadline()) {
+                break;
+            }
             $params = array(
                 'from'    => $this->getConfiguration('from_id'),
                 'to'      => $this->getConfiguration('to_id'),
@@ -807,7 +850,19 @@ class sncbnmbs extends eqLogic {
                 break;
             }
 
-            $connections = isset($data['connection']) ? $data['connection'] : array();
+            /*
+             * Une réponse sans liste de connexions n'est pas « aucun train » :
+             * iRail rend toujours la clé, vide au besoin. L'accepter remplaçait
+             * le cache par un créneau vide et faisait avancer l'heure de lecture,
+             * masquant la panne au lieu de la signaler.
+             */
+            if (!array_key_exists('connection', $data)) {
+                if ($page === 0) {
+                    throw new sncbnmbsTransientException(__('Réponse incomplète d\'iRail.', __FILE__));
+                }
+                break;
+            }
+            $connections = $data['connection'];
             if (is_array($connections) && isset($connections['id'])) {
                 // iRail rend un objet nu quand il n'y a qu'un seul résultat.
                 $connections = array($connections);
@@ -1475,6 +1530,12 @@ class sncbnmbs extends eqLogic {
         return __CLASS__ . '::alerts::' . $this->getId();
     }
 
+    /* Heure de la dernière lecture réussie, 0 si jamais lu. */
+    public function fetchedAt() {
+        $cache = $this->getJourneys();
+        return isset($cache['fetchedAt']) ? (int) $cache['fetchedAt'] : 0;
+    }
+
     public function getJourneys() {
         $cache = cache::byKey($this->journeyKey());
         $value = $cache->getValue();
@@ -1867,7 +1928,8 @@ class sncbnmbs extends eqLogic {
         }
 
         $data = json_decode($body, true);
-        if (!is_array($data)) {
+        // « {} » ou « [] » : iRail rend toujours au moins sa version et l'heure.
+        if (!is_array($data) || empty($data)) {
             // Une page d'erreur d'un intermédiaire, le plus souvent : passagère.
             throw new sncbnmbsTransientException(__('Réponse illisible d\'iRail.', __FILE__));
         }

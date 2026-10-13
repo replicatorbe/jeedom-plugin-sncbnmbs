@@ -1,5 +1,20 @@
 # SNCB/NMBS plugin changelog
 
+## 1.3.1
+
+**Fixes**
+
+- After an iRail error during monitoring, the journey was meant to be read
+  again two minutes later, but it often took three: a cron run landing a few
+  seconds early skipped its turn. The announced delay is now kept.
+- When iRail answered slowly, the first journey could use up the whole time
+  allotted to a cron run on its own. The other journeys were then no longer
+  read, with no error in the log. The journey read least recently now goes
+  first, and a journey being read stops after the first page once time is up.
+- An empty answer from iRail was taken as "no train": the timetable was wiped
+  and the last-check time moved forward, hiding the outage. It is now treated
+  as a temporary outage, and the known timetable stays displayed.
+
 ## 1.3
 
 **Fixes**

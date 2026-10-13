@@ -1,5 +1,23 @@
 # Changelog du plugin SNCB/NMBS
 
+## 1.3.1
+
+**Corrections**
+
+- Après une erreur d'iRail en pleine surveillance, le trajet devait être relu
+  deux minutes plus tard, mais il l'était souvent au bout de trois : le passage
+  du cron qui tombait quelques secondes trop tôt sautait son tour. Le délai
+  annoncé est maintenant tenu.
+- Quand iRail répond lentement, le premier trajet pouvait épuiser à lui seul le
+  temps alloué au passage du cron. Les autres trajets n'étaient alors plus
+  relus, sans aucune erreur dans le journal. Le trajet le moins récemment lu
+  passe désormais en premier, et un trajet en cours de lecture s'arrête à la
+  première page quand le temps est écoulé.
+- Une réponse vide d'iRail était prise pour « aucun train » : les horaires
+  étaient effacés et l'heure de dernière vérification avançait, ce qui masquait
+  la panne. Elle est maintenant traitée comme une panne passagère, et les
+  horaires connus restent affichés.
+
 ## 1.3
 
 **Corrections**
