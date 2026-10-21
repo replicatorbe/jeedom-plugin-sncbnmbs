@@ -1,5 +1,19 @@
 # Changelog du plugin SNCB/NMBS
 
+## 1.3.2
+
+**Surveillance**
+
+- Une ligne par trajet dans la page **Santé** de Jeedom : l'âge de la dernière
+  lecture réussie d'iRail, comparé au rythme attendu à cette heure-là (chaque
+  minute en surveillance, chaque quart d'heure dans le créneau, chaque heure
+  ailleurs, rien la nuit), et la panne en cours.
+- **Délai max entre 2 communications** réglé à 30 minutes à la création, et sur
+  les trajets existants au prochain enregistrement. Les commandes étant
+  recomposées chaque minute, hors créneau compris, ce délai ne se déclenche que
+  si le cron s'arrête ou si iRail n'a plus répondu depuis deux jours. Une
+  valeur déjà choisie n'est pas touchée.
+
 ## 1.3.1
 
 **Corrections**

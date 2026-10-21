@@ -110,6 +110,16 @@ class sncbnmbs extends eqLogic {
     /* Échecs passagers consécutifs tolérés avant d'alerter le centre de messages. */
     const TRANSIENT_REPORT_AFTER = 3;
 
+    /*
+     * « Délai max entre 2 communications » posé à la création, en minutes. Le
+     * cron recompose les commandes de chaque trajet toutes les minutes, depuis
+     * le cache quand iRail n'est pas rappelé — de nuit, hors créneau, en recul
+     * après échec. Une demi-heure sans rien, ce n'est donc jamais le créneau :
+     * c'est le cron qui ne passe plus, ou un trajet dont les horaires n'ont plus
+     * été lus depuis deux jours et ont quitté le cache.
+     */
+    const TIMEOUT_MINUTES = 30;
+
     /* Garde-fou contre un scénario qui appellerait « Rafraîchir » en boucle. */
     const FORCE_MIN_INTERVAL = 20;
 
@@ -319,9 +329,97 @@ class sncbnmbs extends eqLogic {
         return false;
     }
 
+    /* =================================================================== SANTÉ */
+
+    /*
+     * Une ligne par trajet actif dans la page Santé de Jeedom : l'âge de la
+     * dernière lecture réussie d'iRail rapporté au rythme attendu à cette
+     * heure-ci, et la panne en cours. Lecture du cache seulement : ni appel à
+     * iRail, ni écriture.
+     */
+    public static function health() {
+        $return = array();
+        $now = time();
+        foreach (self::byType(__CLASS__, true) as $eqLogic) {
+            $name = htmlspecialchars($eqLogic->getHumanName(), ENT_QUOTES);
+            if (!$eqLogic->isConfigured()) {
+                $return[] = array(
+                    'test'   => $name,
+                    'result' => __('Trajet incomplet', __FILE__),
+                    'advice' => __('Choisissez deux gares différentes.', __FILE__),
+                    'state'  => false,
+                );
+                continue;
+            }
+            $fetchedAt = $eqLogic->fetchedAt();
+            $age = ($fetchedAt > 0) ? $now - $fetchedAt : null;
+            $period = $eqLogic->expectedPeriod($now);
+            $fresh = ($age !== null && $age <= $period['tolerance']);
+            $backoff = $eqLogic->getBackoff();
+            $fails = isset($backoff['fails']) ? (int) $backoff['fails'] : 0;
+
+            $result = ($age === null)
+                ? __('iRail jamais lu', __FILE__)
+                : sprintf(__('iRail lu il y a %s (%s)', __FILE__), self::healthAge($age), $period['label']);
+            if ($fails > 0) {
+                $result .= ' — ' . sprintf(__('%d échec(s) d\'affilée', __FILE__), $fails);
+            }
+            $problem = $eqLogic->currentProblem();
+            if ($problem !== '') {
+                // Déjà passé par secureXSS() à l'enregistrement du message.
+                $result .= ' — ' . $problem;
+            }
+            $return[] = array(
+                'test'   => $name,
+                'result' => $result,
+                'advice' => $fresh ? '' : __('Les horaires affichés ne sont plus à jour : voir le log du plugin. iRail est un service communautaire, ses pannes se résorbent en général d\'elles-mêmes.', __FILE__),
+                'state'  => $fresh,
+            );
+        }
+        return $return;
+    }
+
+    /*
+     * Rythme de lecture attendu maintenant, et l'âge toléré avant de parler de
+     * retard : trois lectures manquées. Hors créneau, la tolérance couvre les
+     * heures calmes de la nuit, où iRail n'est pas interrogé du tout.
+     */
+    public function expectedPeriod($_now = null) {
+        $now = ($_now === null) ? time() : $_now;
+        if ($this->isWatching($now)) {
+            return array('label' => __('relu chaque minute', __FILE__), 'tolerance' => 3 * max(60, self::BACKOFF_WATCHING_MAX));
+        }
+        if ($this->inSlot($now)) {
+            return array('label' => __('relu chaque quart d\'heure', __FILE__), 'tolerance' => 3 * self::SLOT_INTERVAL);
+        }
+        return array(
+            'label'     => __('relu chaque heure hors créneau', __FILE__),
+            'tolerance' => (self::QUIET_TO - self::QUIET_FROM) * 3600 + 3 * self::IDLE_INTERVAL,
+        );
+    }
+
+    /* « 3 min », « 2 h » : l'ordre de grandeur suffit à la page Santé. */
+    private static function healthAge($_seconds) {
+        if ($_seconds < 3600) {
+            return max(1, (int) round($_seconds / 60)) . ' min';
+        }
+        if ($_seconds < 172800) {
+            return (int) floor($_seconds / 3600) . ' h';
+        }
+        return (int) floor($_seconds / 86400) . ' j';
+    }
+
     /* ===================================================== CYCLE DE VIE eqLogic */
 
     public function preSave() {
+        /*
+         * Le coeur marque l'équipement en défaut au-delà de ce délai sans
+         * communication. Posé une seule fois : si l'utilisateur l'ajuste
+         * ensuite, c'est son choix.
+         */
+        if ((int) $this->getTimeout() === 0) {
+            $this->setTimeout(self::TIMEOUT_MINUTES);
+        }
         /*
          * Aucune exception ici : le coeur crée l'équipement avec son seul nom.
          * Toute validation rendrait le bouton « Ajouter » définitivement
@@ -1564,7 +1662,7 @@ class sncbnmbs extends eqLogic {
         return __CLASS__ . '::backoff::' . $this->getId();
     }
 
-    private function getBackoff() {
+    public function getBackoff() {
         $cache = cache::byKey($this->backoffKey());
         $value = $cache->getValue();
         return is_array($value) ? $value : array();
@@ -1638,6 +1736,18 @@ class sncbnmbs extends eqLogic {
 
     private function clearProblem() {
         message::removeAll(__CLASS__, 'journey' . $this->getId());
+    }
+
+    /* La panne affichée au centre de messages pour ce trajet, sans le nom de
+     * l'équipement qui la précède ; chaîne vide s'il n'y en a pas. */
+    public function currentProblem() {
+        $existing = message::byPluginLogicalId(__CLASS__, 'journey' . $this->getId());
+        foreach (is_array($existing) ? $existing : array() as $message) {
+            $text = (string) $message->getMessage();
+            $prefix = secureXSS($this->getHumanName() . ' ');
+            return (strpos($text, $prefix) === 0) ? substr($text, strlen($prefix)) : $text;
+        }
+        return '';
     }
 
     public function getRefreshError() {
