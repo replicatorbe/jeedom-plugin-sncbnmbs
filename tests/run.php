@@ -227,6 +227,51 @@ $passe->invoke(null, array(new trajetCron('Braine', $h('1300')), new trajetCron(
 check('à la minute suivante, c\'est l\'autre', implode(', ', trajetCron::$journal), 'lu Braine, cache Soignies');
 echeance(null);
 
+echo "Panne d'iRail : au centre de messages après un quart d'heure, et sous l'identifiant du trajet\n";
+/* Un trajet surveillé toute la journée, tous les jours, dont iRail échoue. */
+class trajetEnPanne extends sncbnmbs {
+    public static $erreur = null;
+    public static function call($_path, $_params = array()) { throw self::$erreur; }
+}
+function panne($_erreur, $_recul) {
+    cache::$values = array();
+    message::$messages = array();
+    log::$lines = array();
+    if ($_recul !== null) {
+        cache::set('sncbnmbs::backoff::1', $_recul);
+    }
+    trajetEnPanne::$erreur = $_erreur;
+    $trajet = new trajetEnPanne();
+    $trajet->setConfiguration('from_id', 'BE.NMBS.008813003');
+    $trajet->setConfiguration('to_id', 'BE.NMBS.008812005');
+    $trajet->setConfiguration('slot_start', '00:00');
+    $trajet->setConfiguration('slot_end', '23:59');
+    for ($d = 1; $d <= 7; $d++) {
+        $trajet->setConfiguration('day_' . $d, 1);
+    }
+    $trajet->update();
+    return array_map(function ($_m) { return $_m['logicalId']; }, message::$messages);
+}
+$t = time();
+check('1er 504 : rien au centre de messages', panne(new sncbnmbsTransientException('HTTP 504'), null), array());
+check('1er 504 : noté en avertissement', count(preg_grep('/^warning : /', log::$lines)), 1);
+check('le début de la série est mémorisé', cache::$values['sncbnmbs::backoff::1']['since'] >= $t, true);
+// Le cas du 10/11/2026 : trois échecs en quatre minutes, relus toutes les deux minutes.
+check('3e 504 en quatre minutes : toujours rien', panne(new sncbnmbsTransientException('HTTP 504'),
+    array('fails' => 2, 'at' => $t - 120, 'wait' => 120, 'since' => $t - 240)), array());
+check('6e 504 après quatorze minutes : toujours rien', panne(new sncbnmbsTransientException('HTTP 504'),
+    array('fails' => 5, 'at' => $t - 120, 'wait' => 120, 'since' => $t - 840)), array());
+check('le début de la série est conservé', cache::$values['sncbnmbs::backoff::1']['since'], $t - 840);
+check('504 après un quart d\'heure : un seul message, celui du trajet', panne(new sncbnmbsTransientException('HTTP 504'),
+    array('fails' => 7, 'at' => $t - 120, 'wait' => 120, 'since' => $t - 960)), array('journey1'));
+check('aucune ligne en erreur au journal', count(preg_grep('/^error : /', log::$lines)), 0);
+check('recul d\'une version antérieure : l\'échec précédent sert de début', panne(new sncbnmbsTransientException('HTTP 504'),
+    array('fails' => 4, 'at' => $t - 1000, 'wait' => 480)), array('journey1'));
+check('gare inconnue : un seul message, aussitôt', panne(new Exception('Gare inconnue'), null), array('journey1'));
+check('gare inconnue : aucune ligne en erreur', count(preg_grep('/^error : /', log::$lines)), 0);
+cache::$values = array();
+message::$messages = array();
+
 if ($live) {
     echo "Essai réel : Bruxelles-Central → Bruxelles-Nord, maintenant\n";
     $now = time();

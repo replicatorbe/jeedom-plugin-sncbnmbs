@@ -1,5 +1,21 @@
 # Changelog du plugin SNCB/NMBS
 
+## 1.3.3
+
+**Corrections**
+
+- Une panne d'iRail laissait au centre de messages un second exemplaire du
+  message, quand l'option du coeur « Ajouter un message à chaque erreur dans
+  les logs » est active. Celui du trajet disparaissait au retour d'iRail,
+  l'autre restait indéfiniment. La panne n'est plus notée qu'en avertissement
+  dans le journal : le seul message est celui du plugin, qu'il retire lui-même.
+- Les erreurs 504 matinales d'iRail arrivaient au centre de messages en trois
+  ou quatre minutes pendant la surveillance, où le trajet est relu toutes les
+  deux minutes : trois échecs d'affilée suffisaient. Une panne passagère n'y
+  entre plus que si elle dure depuis au moins un quart d'heure, sans aucune
+  lecture réussie. Une gare inconnue ou une demande refusée reste signalée
+  aussitôt.
+
 ## 1.3.2
 
 **Surveillance**

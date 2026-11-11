@@ -17,10 +17,29 @@ class config {
     }
 }
 
+/* Le journal reproduit l'option du coeur « addMessageForErrorLog » : une
+ * ligne en erreur pose aussi un message, sous l'identifiant reçu — vide le
+ * plus souvent, et que personne ne pourra donc retirer. */
 class log {
     public static $lines = array();
     public static function add($_plugin, $_level, $_message, $_logicalId = '') {
         self::$lines[] = $_level . ' : ' . $_message;
+        if ($_level === 'error') {
+            message::add($_plugin, $_message, '', $_logicalId);
+        }
+    }
+}
+
+/* Le centre de messages, indexé par identifiant logique. */
+class message {
+    public static $messages = array();
+    public static function add($_plugin, $_message, $_action = '', $_logicalId = '') {
+        self::$messages[] = array('plugin' => $_plugin, 'logicalId' => $_logicalId, 'message' => $_message);
+    }
+    public static function removeAll($_plugin = '', $_logicalId = '') {
+        self::$messages = array_values(array_filter(self::$messages, function ($_m) use ($_plugin, $_logicalId) {
+            return !($_m['plugin'] === $_plugin && $_m['logicalId'] === $_logicalId);
+        }));
     }
 }
 

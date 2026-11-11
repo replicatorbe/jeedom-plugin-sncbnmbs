@@ -107,8 +107,17 @@ class sncbnmbs extends eqLogic {
      */
     const BACKOFF_SLACK = 5;
 
-    /* Échecs passagers consécutifs tolérés avant d'alerter le centre de messages. */
-    const TRANSIENT_REPORT_AFTER = 3;
+    /*
+     * Durée, en secondes, qu'une panne passagère doit avoir tenu — depuis le
+     * premier échec de la série — avant d'entrer au centre de messages. Un
+     * compte d'échecs ne convenait pas : pendant la surveillance, le recul est
+     * plafonné à deux minutes, et trois échecs s'enchaînaient en trois ou
+     * quatre minutes. Les 504 matinaux d'iRail, qui se résorbent seuls,
+     * finissaient donc au centre de messages presque à chaque fois (relevé le
+     * 10/11/2026, 07:23 et 07:25). Un quart d'heure de panne, en revanche,
+     * n'est plus un hoquet.
+     */
+    const TRANSIENT_REPORT_DELAY = 900;
 
     /*
      * « Délai max entre 2 communications » posé à la création, en minutes. Le
@@ -771,18 +780,20 @@ class sncbnmbs extends eqLogic {
              * commandes sont recomposées depuis le cache, avec l'heure de la
              * dernière lecture réussie. L'erreur remonte à l'appelant.
              */
-            $fails = $this->noteFailure($now);
+            $backoff = $this->noteFailure($now);
             $this->_refreshError = $e->getMessage();
             /*
              * iRail rend des 504 par grappes, certains matins une dizaine en
              * une heure, qui se résorbent seuls à la minute suivante. Les
              * signaler un par un faisait clignoter le centre de messages pour
              * une panne dont l'utilisateur ne peut rien faire. Une panne
-             * passagère n'y entre qu'une fois installée ; une gare inconnue,
-             * elle, ne se corrigera pas seule et reste signalée aussitôt.
+             * passagère n'y entre qu'une fois installée, c'est-à-dire après
+             * TRANSIENT_REPORT_DELAY d'échecs ininterrompus ; une gare
+             * inconnue, elle, ne se corrigera pas seule et reste signalée
+             * aussitôt.
              */
             if ($e instanceof sncbnmbsTransientException) {
-                if ($fails >= self::TRANSIENT_REPORT_AFTER) {
+                if (($now - $backoff['since']) >= self::TRANSIENT_REPORT_DELAY) {
                     $this->reportProblem($e->getMessage());
                 } else {
                     log::add(__CLASS__, 'warning', $this->getHumanName() . ' ' . $e->getMessage());
@@ -1680,17 +1691,31 @@ class sncbnmbs extends eqLogic {
         $fails = isset($state['fails']) ? ((int) $state['fails'] + 1) : 1;
         $attente = min(self::BACKOFF_MAX, self::BACKOFF_BASE * pow(2, $fails - 1));
         /*
+         * Début de la série d'échecs, conservé d'un échec à l'autre jusqu'au
+         * premier succès. Un recul enregistré par une version antérieure n'a
+         * pas ce champ : l'échec précédent en tient lieu, faute de mieux.
+         */
+        if (isset($state['since'])) {
+            $since = (int) $state['since'];
+        } elseif (isset($state['at'])) {
+            $since = (int) $state['at'];
+        } else {
+            $since = $now;
+        }
+        /*
          * On mémorise l'attente et l'instant de l'échec, et non l'échéance :
          * shouldPoll() doit pouvoir raccourcir l'attente quand la surveillance
          * est active, ce qu'une échéance déjà calculée interdirait.
          */
-        cache::set($this->backoffKey(), array(
+        $state = array(
             'fails' => $fails,
             'at'    => $now,
             'wait'  => $attente,
-        ), 86400);
+            'since' => $since,
+        );
+        cache::set($this->backoffKey(), $state, 86400);
         // Rendu à update(), qui ne signale une panne passagère qu'une fois installée.
-        return $fails;
+        return $state;
     }
 
     private function clearBackoff() {
@@ -1724,7 +1749,16 @@ class sncbnmbs extends eqLogic {
 
     private function reportProblem($_text) {
         $text = $this->getHumanName() . ' ' . $_text;
-        log::add(__CLASS__, 'error', $text);
+        /*
+         * Avertissement, et non erreur : avec l'option du coeur « Ajouter un
+         * message à chaque erreur dans les logs », log::add() en 'error' crée
+         * lui-même un second message, sans identifiant logique, que
+         * clearProblem() ne peut jamais retrouver. Le 504 du 10/11/2026 en a
+         * laissé deux au centre de messages, bien après le retour d'iRail. Le
+         * message, c'est le plugin qui le pose juste en dessous, et qui sait
+         * le retirer ; le journal n'a qu'à garder la trace.
+         */
+        log::add(__CLASS__, 'warning', $text);
         /*
          * message::save() ne met à jour que la date et le compteur d'un message
          * existant, jamais son texte : sans cet effacement préalable, la

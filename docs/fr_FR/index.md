@@ -181,10 +181,12 @@ Quand iRail ne répond pas, rien n'est effacé. Les derniers horaires connus
 restent affichés, la commande « Dernière vérification » garde l'heure de la
 dernière lecture réussie. Une gare inconnue ou une demande refusée est signalée
 aussitôt au centre de messages. Une panne passagère d'iRail — service saturé
-(erreur 5xx), délai dépassé, réponse illisible — n'y apparaît qu'à partir du
-**troisième échec consécutif** : iRail rend certains matins une dizaine d'erreurs
-504 isolées, qui se résorbent seules la minute suivante. D'ici là, elle n'est
-notée qu'en avertissement dans le journal du plugin.
+(erreur 5xx), délai dépassé, réponse illisible — n'y apparaît que lorsqu'elle
+dure depuis **au moins un quart d'heure**, sans un seul succès depuis le premier
+échec : iRail rend certains matins une dizaine d'erreurs 504 isolées, qui se
+résorbent seules en quelques minutes. D'ici là, elle n'est notée qu'en
+avertissement dans le journal du plugin. Le message disparaît de lui-même à la
+première lecture réussie.
 
 ## Agir sur un retard
 
