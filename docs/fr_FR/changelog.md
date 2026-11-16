@@ -1,5 +1,14 @@
 # Changelog du plugin SNCB/NMBS
 
+## 1.3.4
+
+**Corrections**
+
+- Les 504 passagers d'iRail ne sont plus notés en avertissement mais au niveau
+  info, tant que la panne dure depuis moins d'un quart d'heure : ils
+  remplissaient le journal de lignes WARNING sans rien demander. Une panne
+  installée reste signalée en avertissement et au centre de messages.
+
 ## 1.3.3
 
 **Corrections**

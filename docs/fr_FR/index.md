@@ -184,8 +184,8 @@ aussitôt au centre de messages. Une panne passagère d'iRail — service satur�
 (erreur 5xx), délai dépassé, réponse illisible — n'y apparaît que lorsqu'elle
 dure depuis **au moins un quart d'heure**, sans un seul succès depuis le premier
 échec : iRail rend certains matins une dizaine d'erreurs 504 isolées, qui se
-résorbent seules en quelques minutes. D'ici là, elle n'est notée qu'en
-avertissement dans le journal du plugin. Le message disparaît de lui-même à la
+résorbent seules en quelques minutes. D'ici là, elle n'est notée qu'au
+niveau info dans le journal du plugin. Le message disparaît de lui-même à la
 première lecture réussie.
 
 ## Agir sur un retard

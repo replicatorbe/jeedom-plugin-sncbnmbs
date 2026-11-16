@@ -254,7 +254,8 @@ function panne($_erreur, $_recul) {
 }
 $t = time();
 check('1er 504 : rien au centre de messages', panne(new sncbnmbsTransientException('HTTP 504'), null), array());
-check('1er 504 : noté en avertissement', count(preg_grep('/^warning : /', log::$lines)), 1);
+check('1er 504 : noté en info', count(preg_grep('/^info : /', log::$lines)), 1);
+check('1er 504 : aucun avertissement', count(preg_grep('/^warning : /', log::$lines)), 0);
 check('le début de la série est mémorisé', cache::$values['sncbnmbs::backoff::1']['since'] >= $t, true);
 // Le cas du 10/11/2026 : trois échecs en quatre minutes, relus toutes les deux minutes.
 check('3e 504 en quatre minutes : toujours rien', panne(new sncbnmbsTransientException('HTTP 504'),

@@ -790,13 +790,15 @@ class sncbnmbs extends eqLogic {
              * passagère n'y entre qu'une fois installée, c'est-à-dire après
              * TRANSIENT_REPORT_DELAY d'échecs ininterrompus ; une gare
              * inconnue, elle, ne se corrigera pas seule et reste signalée
-             * aussitôt.
+             * aussitôt. Avant ce délai, l'échec n'est noté qu'en info : en
+             * avertissement, ces grappes de 504 remplissaient le journal
+             * (plus de deux cents lignes en une semaine) sans rien demander.
              */
             if ($e instanceof sncbnmbsTransientException) {
                 if (($now - $backoff['since']) >= self::TRANSIENT_REPORT_DELAY) {
                     $this->reportProblem($e->getMessage());
                 } else {
-                    log::add(__CLASS__, 'warning', $this->getHumanName() . ' ' . $e->getMessage());
+                    log::add(__CLASS__, 'info', $this->getHumanName() . ' ' . $e->getMessage());
                 }
             } else {
                 $this->reportProblem($e->getMessage());
